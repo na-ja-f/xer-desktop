@@ -88,7 +88,7 @@ const ControllerToolbar = ({
                >
                    {versions.map(v => (
                       <option key={v.id} value={v.id}>
-                         {v.type === 'baseline' ? 'Project' : v.data_date}
+                         {v.type === 'baseline' ? (v.name || 'Project') : v.data_date}
                       </option>
                    ))}
                </select>

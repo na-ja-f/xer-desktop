@@ -281,7 +281,7 @@ class XERAnalyzer:
     def _explain(self, query: str, tool_call: Dict, tool_result: Dict, context: Optional[Dict], session: Dict) -> Dict:
         if tool_result.get("clarify") or not tool_result.get("success"):
             err_msg = tool_result.get("error", "I cannot reliably answer this based on the available data.")
-            if tool_result.get("suggestions"):
+            if tool_result.get("suggestions") and not any(x in err_msg for x in ["Which one did you mean", "Did you mean '", "Is this what you meant", "narrow it down", "\n\n"]):
                 suggs = ", ".join(tool_result["suggestions"])
                 err_msg = f"No exact match found. Did you mean: {suggs}?"
             
@@ -408,12 +408,40 @@ class XERAnalyzer:
     def analyze(self, query: str, context: Optional[Dict] = None, session_id: str = "default") -> Dict:
         session = self._get_session(session_id)
         try:
+            from .activity_resolver import resolve_followup_selection
+            pending = session.get("pending_activity_selection")
+            
+            if pending:
+                match = resolve_followup_selection(query, pending["candidates"])
+                if match:
+                    logger.info(f"[{session_id}] Resolved disambiguation to {match.get('task_code')}")
+                    session.pop("pending_activity_selection", None)
+                    
+                    route = {
+                        "query_type": "DATA_QUERY",
+                        "tool": pending["tool"],
+                        "arguments": {"activity_name": match.get('task_code')}
+                    }
+                    tool_result = self._execute_tool(route, context, session)
+                    response = self._explain(pending["original_query"] + f" ({match.get('task_name')})", route, tool_result, context, session)
+                    self._update_session(session, query, route, response)
+                    return response
+                else:
+                    session.pop("pending_activity_selection", None)
+
             # 1. Route/Classify
             route = self._route_query(query, context, session)
             logger.info(f"[{session_id}] Routed to {route.get('tool')} (Type: {route.get('query_type')})")
             
             # 2. Execute tool if needed
             tool_result = self._execute_tool(route, context, session)
+            
+            if tool_result.get("clarify") and tool_result.get("disambiguation_candidates"):
+                session["pending_activity_selection"] = {
+                    "original_query": query,
+                    "candidates": tool_result["disambiguation_candidates"],
+                    "tool": route.get("tool")
+                }
             
             # 3. Explain (Knowledge queries pass empty data to LLM for direct answer)
             response = self._explain(query, route, tool_result, context, session)
@@ -433,31 +461,46 @@ class XERAnalyzer:
         source = self.data_store.get_latest(context=context)
         if not source: return {"success": False, "error": "No schedule data loaded."}
         df = source["df"]["tasks"]
-        names = df["task_name"].tolist()
+        activities = df.to_dict('records')
         
-        exact_code = df[df["task_code"].str.upper() == term.upper()]
-        sub = df[df["task_name"].str.contains(term, case=False, na=False)]
-        fuzzy_names = difflib.get_close_matches(term, names, n=5, cutoff=0.45)
-        fuzzy_df = df[df["task_name"].isin(fuzzy_names)]
-
-        import pandas as pd
-        combined = pd.concat([exact_code, sub, fuzzy_df]).drop_duplicates("task_id").head(8)
-
-        if combined.empty:
-            suggestions = difflib.get_close_matches(term, names, n=3, cutoff=0.35)
-            return {"success": False, "suggestions": suggestions, "error": f"No activity matching '{term}' found."}
+        from .activity_resolver import resolve_activity_reference, format_resolution_response
+        
+        resolution = resolve_activity_reference(term, activities)
+        resp = format_resolution_response(term, resolution)
+        
+        if resp["status"] in ["none", "disambiguate", "narrow"]:
+            return {
+                "success": False, 
+                "error": resp["message"], 
+                "clarify": True, 
+                "suggestions": [m.get("task_name", m.get("task_code", "")) for m in resolution["matches"][:3]],
+                "disambiguation_candidates": resolution["matches"][:5] if resp["status"] == "disambiguate" else None,
+                "original_query": term
+            }
+            
+        combined_list = resolution["matches"]
+        # Limit to top 8 if needed, though format_resolution_response handles logic, we shouldn't flood UI
+        combined_list = combined_list[:8]
 
         hpd = source.get("hours_per_day", 8)
         analysis = self.data_store.get_deterministic_analysis(context=context).get("activityAnalysis", {})
         
         full_data = []
-        for _, r in combined.iterrows():
+        for r in combined_list:
             tid = r["task_id"]
             act_analysis = analysis.get(tid, {})
             float_hrs = float(r.get("float_hrs", r.get("total_float_hr_cnt", 0) or 0))
+            status_enum = act_analysis.get("status_enum", r.get("status_enum", "NOT_STARTED"))
+            status_map = {
+                "COMPLETED": "Completed",
+                "IN_PROGRESS": "In Progress",
+                "NOT_STARTED": "Not Started"
+            }
+            display_status = status_map.get(status_enum, "Not Started")
+
             full_data.append({
                 "id": tid, "code": r["task_code"], "name": r["task_name"],
-                "status": r.get("status_enum", "Unknown"),
+                "status": display_status,
                 "start": str(r.get("target_start_date", ""))[:10],
                 "finish": str(r.get("target_end_date", ""))[:10],
                 "float_days": round(float_hrs / hpd, 1),
@@ -469,7 +512,7 @@ class XERAnalyzer:
         
         return {"success": True, "total_count": len(full_data), "displayed_count": len(full_data),
                 "is_truncated": False, "data": full_data, "display_items": full_data, "all_items": full_data, "data_ref": data_ref,
-                "stats": {"matched": len(full_data)}, "template_type": "activity"}
+                "stats": {"matched": len(full_data), "resolution_message": resp["message"]}, "template_type": "activity"}
 
     def _filter_wbs(self, acts: Dict, wbs_filter: Optional[str], source: Dict) -> Dict:
         if not wbs_filter or wbs_filter == "ALL": return acts

@@ -520,7 +520,17 @@ function App() {
   const formatP6Date = (dateStr) => {
     if (!dateStr || dateStr === 'None' || dateStr === 'nan' || dateStr === '-') return '-'
     try {
-      const date = new Date(dateStr.split(' ')[0])
+      const trimmed = dateStr.trim()
+      // If it is already in 'DD MMM YYYY' format (e.g. '09 Jun 2025'), return as-is
+      if (/^\d{2}\s[a-zA-Z]{3}\s\d{4}$/.test(trimmed)) {
+        return trimmed
+      }
+      // For ISO dates like '2025-06-09 08:00', take only the date part
+      let cleanStr = trimmed
+      if (trimmed.includes('-')) {
+        cleanStr = trimmed.split(' ')[0]
+      }
+      const date = new Date(cleanStr)
       if (isNaN(date.getTime())) return dateStr
       return new Intl.DateTimeFormat('en-GB', { 
         day: '2-digit',
@@ -531,6 +541,7 @@ function App() {
       return dateStr
     }
   }
+
 
   // Header Label Mapping
   const getHeaderLabel = (key) => {
@@ -581,8 +592,8 @@ function App() {
           <span className="font-medium text-gray-600">Period:</span>
           <span className="font-bold text-gray-900">
             {viewMode === 'audit' 
-              ? (auditStats?.project_start ? `${auditStats.project_start} to ${auditStats.project_finish}` : 'Not Available') 
-              : (controllerStats?.project_start ? `${controllerStats.project_start} to ${controllerStats.project_finish}` : 'Not Available')
+              ? (auditStats?.project_start ? `${auditStats.project_start} to ${auditStats.project_finish}` : 'No project loaded') 
+              : (controllerStats?.project_start ? `${controllerStats.project_start} to ${controllerStats.project_finish}` : 'No project loaded')
             }
           </span>
         </div>

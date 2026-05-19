@@ -203,7 +203,7 @@ const ControllerFloatingChat = ({
         {/* Input Area */}
         <div className="p-6 bg-white border-t border-gray-100">
           <OptimizedChatInput 
-            placeholder="Compare baseline vs update..."
+            placeholder="Ask anything about this project..."
             isTyping={isControllerTyping}
             onSubmit={handleControllerAsk}
             className="w-full pl-6 pr-14 py-4 bg-gray-50 border border-gray-100 rounded-2xl text-sm focus:ring-2 focus:ring-blue-500/20 outline-none transition-all placeholder:text-gray-400 font-medium"

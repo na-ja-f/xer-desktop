@@ -288,6 +288,9 @@ class CPMScheduler:
                 ts = pd.to_datetime(str(val)[:19], errors='coerce')
                 if pd.isnull(ts):
                     return None
+                # Primavera P6 uses these specific dates as internal 'null' sentinels in the database
+                if ts.strftime('%Y-%m-%d') in ('2001-09-01', '2001-08-01', '1990-01-01', '1900-01-01'):
+                    return None
                 return ts.strftime('%d %b %Y')
             except Exception:
                 return None
@@ -543,6 +546,8 @@ class CPMScheduler:
         # ---- Output ----
         def fmt(dt: Optional[datetime]) -> Optional[str]:
             if dt is None:
+                return None
+            if dt.strftime('%Y-%m-%d') in ('2001-09-01', '2001-08-01', '1990-01-01', '1900-01-01'):
                 return None
             return dt.strftime('%d %b %Y')
 

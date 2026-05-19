@@ -1027,10 +1027,10 @@ class XERDataStore:
                     'is_predicted': m.get('is_predicted_date', False),
                     'float_hrs': safe_float(m.get('float_hrs', 0)),
                     'delay_float_category': m.get('delay_float_category', 'SAFE'),
-                    'early_start': clean_rec.get('early_start') or clean_rec.get('early_start_date') or clean_rec.get('es_date') or "",
-                    'early_finish': clean_rec.get('early_finish') or clean_rec.get('early_end_date') or clean_rec.get('ef_date') or "",
-                    'late_start': clean_rec.get('late_start') or clean_rec.get('late_start_date') or clean_rec.get('ls_date') or "",
-                    'late_finish': clean_rec.get('late_finish') or clean_rec.get('late_end_date') or clean_rec.get('lf_date') or "",
+                    'early_start': clean_rec.get('early_start', ""),
+                    'early_finish': clean_rec.get('early_finish', ""),
+                    'late_start': clean_rec.get('late_start', ""),
+                    'late_finish': clean_rec.get('late_finish', ""),
                     'predecessors': source.get('dependency_graph', {}).get(tid, {}).get('predecessors', []),
                     'successors': source.get('dependency_graph', {}).get(tid, {}).get('successors', [])
                 }

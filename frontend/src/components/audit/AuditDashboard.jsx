@@ -37,7 +37,10 @@ const AuditDashboard = ({ stats }) => {
               </div>
               <div className="flex justify-between items-center">
                  <span className="text-gray-400 text-xs font-bold uppercase tracking-wider">Constraint:</span>
-                 <span className={`text-lg font-black ${stats?.delay_matrix?.isConstrained ? 'text-red-400' : 'text-green-400'}`}>
+                 <span 
+                   className={`text-lg font-black cursor-help ${stats?.delay_matrix?.isConstrained ? 'text-red-400' : 'text-green-400'}`}
+                   title={stats?.delay_matrix?.isConstrained ? 'Project has a hard finish constraint (e.g., Must Finish By) which is causing negative float and may be artificially hiding delays.' : 'Project finish date is dynamic and purely logic-driven without hard project-level constraints.'}
+                 >
                    {stats?.delay_matrix?.isConstrained ? 'Fixed-Finish' : 'Dynamic'}
                  </span>
               </div>

@@ -34,7 +34,7 @@ const TaskRow = React.memo(({ task, formatP6Date }) => {
   return (
     <div className="flex flex-col">
       <div className={rowClass} onClick={() => setShowDetails(!showDetails)}>
-        <div className="w-24 shrink-0 px-1 text-[9px] font-black text-blue-600/70 truncate">{task.task_code}</div>
+        <div className="w-36 shrink-0 px-1 text-[9px] font-black text-blue-600/70 truncate" title={task.task_code}>{task.task_code}</div>
         
         <div className="flex-1 px-2 text-[10px] font-semibold text-gray-900 truncate">{task.task_name}</div>
         <div className="w-24 shrink-0 px-1 flex justify-start">
@@ -85,6 +85,7 @@ const TaskRow = React.memo(({ task, formatP6Date }) => {
             <div className="w-48 shrink-0 flex items-center justify-center">
               <div className="bg-white border-2 border-blue-500 rounded-xl p-3 shadow-md flex flex-col items-center gap-1 text-center">
                 <span className="text-[8px] font-black text-blue-500 uppercase tracking-tighter">Current Activity</span>
+                <span className="text-[9px] font-black text-blue-600 font-mono select-all bg-blue-50 px-2.5 py-0.5 rounded border border-blue-100/50" title="Activity ID - Click or drag to copy">{task.task_code}</span>
                 <span className="text-[10px] font-bold text-gray-900 leading-tight">{task.task_name}</span>
               </div>
             </div>
@@ -146,13 +147,13 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
         onClick={() => setIsExpanded(!isExpanded)}
       >
         {/* ID Column */}
-        <div className="w-24 shrink-0 flex items-center gap-1.5 overflow-hidden">
+        <div className="w-36 shrink-0 flex items-center gap-1.5 overflow-hidden">
           <div className="w-4 h-4 shrink-0 flex items-center justify-center text-gray-400">
             {(hasChildren || hasActivities) ? (
               isExpanded ? <ChevronDown size={14} /> : <ChevronRightIcon size={14} />
             ) : <span className="w-3" />}
           </div>
-          <span className="font-black text-[9px] text-blue-600/70 truncate">{node.wbs_short_name}</span>
+          <span className="font-black text-[9px] text-blue-600/70 truncate" title={node.wbs_short_name}>{node.wbs_short_name}</span>
         </div>
 
         {/* Name Column */}
@@ -193,7 +194,7 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
           {hasActivities && (
             <div className="flex flex-col border-b border-gray-200 bg-white" style={{ paddingLeft: `${((level) * 24) + 16 + 28}px` }}>
                 <div className="flex items-center py-1.5 px-2 bg-gray-50/80 border-b border-gray-200 text-[8px] font-black text-gray-400 uppercase tracking-widest sticky top-0 z-0 shadow-sm">
-                  <div className="w-24 shrink-0 px-1">ID</div>
+                  <div className="w-36 shrink-0 px-1">ID</div>
 
                   <div className="flex-1 px-2">Activity Name</div>
                   <div className="w-24 shrink-0 px-1">Status</div>
@@ -265,7 +266,7 @@ const ControllerTable = ({
                <div className="flex flex-col min-w-[1650px]">
                  {/* Global Sticky Header for Hierarchy */}
                  <div className="flex items-center py-2.5 px-3 bg-gray-50 border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest sticky top-0 z-30 shadow-sm">
-                   <div className="w-24 shrink-0 px-1">ID</div>
+                   <div className="w-36 shrink-0 px-1">ID</div>
                    <div className="flex-1 px-2">WBS Name / Activity Name</div>
                    <div className="w-24 shrink-0 px-1 text-center">Status</div>
                    <div className="w-14 shrink-0 px-1 text-center">Dur</div>
