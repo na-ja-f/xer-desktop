@@ -28,14 +28,17 @@ AVAILABLE TOOLS:
 10. check_integrity() - General logic checks (DCMA-style).
 11. get_project_health() - Overall health score.
 12. get_wbs_summary(wbs_name: str) - WBS summaries.
-13. get_project_summary() - Duration, start/finish dates.
-14. get_resource_summary() - Workforce counts.
+13. get_project_summary() - Duration, start/finish dates, delays, overall project status.
+14. get_resource_summary() - Project-wide resource counts.
+15. get_resource_assignments(activity_name: str) - Resource assignments. Use to find who is working on a specific activity.
+16. get_resource_load() - Resource workload distribution.
 
 ROUTING RULES:
 - If KNOWLEDGE_QUERY: Do NOT call any tool. Return tool: "direct_response".
 - If DATA_QUERY: Match to the most relevant tool.
 - If HYBRID_QUERY: Match to the relevant tool, but signal that interpretation is needed.
 - "Why", "Is it bad", "Explain the impact" questions should always be HYBRID or KNOWLEDGE.
+- FOLLOW-UP RESOLUTION: If the user asks "who is working on it?", "what about its delay?", "show me its resources", resolve "it/this/that" to the Last Activity Discussed (provided below). Include the resolved activity name in the arguments.
 
 Return ONLY a JSON object:
 {"query_type": "DATA_QUERY|KNOWLEDGE_QUERY|HYBRID_QUERY", "tool": "tool_name", "arguments": {}}"""
@@ -57,6 +60,15 @@ GUIDELINES:
 - AVOID ROBOTIC PHRASES: Speak like a human expert.
 - PRIMAVERA EXPERTISE: You know that one open start (Project Start) and one open finish (Project Completion) are ACCEPTABLE and expected. 
 - If only these 2 exist, the summary MUST say: "The schedule contains only the expected project boundary open ends (1 open start and 1 open finish). No improper dangling activities were detected."
+- ZERO MATCH / CLARIFY: If the backend data indicates no matches were found or asks for clarification, your summary must reflect that. Provide exactly one recommendation: "Need help? Type '/' in the input box to see quick commands, or try: 'show critical path activities'." Do NOT output generic recommendations like "Try asking for delayed activities".
+- MISSING DATA / BASELINE-ONLY VARIANCE: If the backend data explicitly shows "delay_days" or "project_delay_days" as null (or if the fields are completely missing), you MUST refuse to claim that the activity or project is "not delayed" or "has 0 variance". Instead, explain that variance and delays cannot be calculated without progress updates. Inform the user of the scheduled dates, and state that an update file must be uploaded to calculate variance. If the value is explicitly 0, it means it was calculated and there is no delay.
+- PROJECT HEALTH NARRATIVE: When explaining project health (tool: get_project_health), act as a forensic AI analyst. You MUST format the `summary` field as a rich Markdown narrative containing:
+   1. **Project Health Summary**: Explain the score (e.g. 20/100) and status (e.g. Critical) and overall delays.
+   2. **Key Problems Detected**: A numbered list identifying the failed DCMA checks from `assessment_details`, their exact metrics, and why they matter forensically.
+   3. **Positive Findings**: Highlight the passing DCMA checks to reassure the user.
+   4. **Overall Assessment**: Conclude the forensic state of the schedule.
+   Put the actionable, prioritized fixes into the JSON `recommendations` array so they render as strategic cards. When making recommendations, you MUST cite the specific metric value or threshold from the assessment (e.g., 'Reduce 30.98% high float to <5%'). Do NOT hallucinate metrics; derive everything strictly from `assessment_details` and `issues`.
+- SCOPE REFUSAL: You only answer construction scheduling or project control questions related to the loaded project (e.g., '{PROJECT_NAME}'). If the user asks about weather, news, sports, or general off-topic questions, you MUST refuse to answer. Use exactly this pattern for your summary: "I help with construction schedule questions for the '{PROJECT_NAME}' project. I don't answer weather, news, or general questions. Try asking about activities, variance, critical path, or trade scope status."
 - DUAL MODE: 
     - For KNOWLEDGE queries: Answer directly and thoroughly using your internal knowledge.
     - For DATA/HYBRID queries: Use the provided BACKEND DATA for numbers, but use your intelligence for the "Why" and "So What".
@@ -127,10 +139,18 @@ class XERAnalyzer:
         ui_state = json.dumps(context or {})
         history = json.dumps([{"user": h["user"], "tool": h["tool"]} for h in session["history"][-3:]])
         
+        # Build context hint for follow-up queries
+        context_hint = ""
+        if session.get("last_search_term"):
+            context_hint = f"\nLast Activity Discussed: \"{session['last_search_term']}\""
+            context_hint += "\nIMPORTANT: If the user says 'it', 'this', 'that activity', they are referring to the above activity. " \
+                           "Resolve the pronoun and include the activity name in the tool arguments."
+        
         user_msg = (
             f"Query: \"{query}\"\n\n"
             f"UI State: {ui_state}\n\n"
             f"Conversation History: {history}"
+            f"{context_hint}"
         )
         
         try:
@@ -186,6 +206,7 @@ class XERAnalyzer:
         # Merge UI Context if applicable
         ui_filters = (context or {}).get("applied_filters", {})
         selected_wbs = (context or {}).get("selected_wbs")
+        selected_version = (context or {}).get("selected_version")
         
         if tool == "direct_response":
             return {"success": True, "tool": "direct_response", "data": [], "template_type": "knowledge"}
@@ -203,37 +224,37 @@ class XERAnalyzer:
         if tool == "get_activity_details":
             name = args.get("activity_name", args.get("name", ""))
             if not name and session.get("last_search_term"): name = session["last_search_term"]
-            result = self.get_activity_details(name, context=ctx)
+            result = self.get_activity_details(name, context=ctx, version_id=selected_version)
         elif tool == "get_delayed_activities":
-            result = self.get_delayed_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs)
+            result = self.get_delayed_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version)
         elif tool == "get_critical_activities" or tool == "get_critical_path":
-            result = self.get_critical_path(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs)
+            result = self.get_critical_path(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version)
         elif tool == "get_negative_float_activities":
-            result = self.get_negative_float_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs)
+            result = self.get_negative_float_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version)
         elif tool == "get_positive_float_activities":
-            result = self.get_positive_float_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs)
+            result = self.get_positive_float_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version)
         elif tool == "check_open_ended_tasks" or tool == "check_open_ends":
-            result = self.check_open_ends(context=ctx)
+            result = self.check_open_ends(context=ctx, version_id=selected_version)
         elif tool == "check_critical_path_continuity" or tool == "check_path_continuity":
-            result = self.check_path_continuity(context=ctx)
+            result = self.check_path_continuity(context=ctx, version_id=selected_version)
         elif tool == "check_integrity":
-            result = self.check_integrity(context=ctx)
+            result = self.check_integrity(context=ctx, version_id=selected_version)
         elif tool == "check_constraints":
-            result = self.check_constraints(context=ctx)
+            result = self.check_constraints(context=ctx, version_id=selected_version)
         elif tool == "check_circular_dependencies":
             result = self.check_circular_dependencies(context=ctx)
         elif tool == "get_project_health":
-            result = self.get_project_health(context=ctx)
+            result = self.get_project_health(context=ctx, version_id=selected_version)
         elif tool == "get_wbs_summary":
-            result = self.get_wbs_summary(args.get("wbs_name"), context=ctx)
+            result = self.get_wbs_summary(args.get("wbs_name"), context=ctx, version_id=selected_version)
         elif tool == "get_project_metrics" or tool == "get_project_summary":
-            result = self.get_project_summary(context=ctx)
+            result = self.get_project_summary(context=ctx, version_id=selected_version)
         elif tool == "get_metric_by_type":
             metric_type = args.get("metric_type")
             if not metric_type:
                 result = {"success": False, "error": "Missing metric type."}
             else:
-                summary = self.get_project_summary(context=ctx)
+                summary = self.get_project_summary(context=ctx, version_id=selected_version)
                 if not summary.get("success"):
                     result = summary
                 else:
@@ -243,11 +264,11 @@ class XERAnalyzer:
                     elif metric_type == "non_critical_activities": val = summary.get("stats", {}).get("non_critical_count")
                     elif metric_type == "duration": val = summary.get("stats", {}).get("total_duration_days")
                     elif metric_type == "negative_float_count": 
-                        val = self.get_negative_float_activities(limit=1, context=ctx).get("total_count", 0)
+                        val = self.get_negative_float_activities(limit=1, context=ctx, version_id=selected_version).get("total_count", 0)
                     elif metric_type == "positive_float_count":
-                        val = self.get_positive_float_activities(limit=1, context=ctx).get("total_count", 0)
+                        val = self.get_positive_float_activities(limit=1, context=ctx, version_id=selected_version).get("total_count", 0)
                     elif metric_type == "open_ends_count":
-                        res = self.check_open_ends(context=ctx)
+                        res = self.check_open_ends(context=ctx, version_id=selected_version)
                         val = res.get("total_count", 0)
                         
                     result = {
@@ -263,11 +284,16 @@ class XERAnalyzer:
         elif tool == "analyze_activity_delay":
             name = args.get("activity_name", "")
             if not name and session.get("last_search_term"): name = session["last_search_term"]
-            result = self.analyze_activity_delay(name, context=ctx)
+            result = self.analyze_activity_delay(name, context=ctx, version_id=selected_version)
         elif tool == "get_resource_summary":
             result = self.resource_engine.get_resource_summary(context=ctx)
         elif tool == "get_resource_assignments":
-            result = self.resource_engine.get_resource_assignments(limit=args.get("limit", 50), context=ctx)
+            activity_name = args.get("activity_name", "")
+            if not activity_name and session.get("last_search_term"): 
+                activity_name = session["last_search_term"]
+            result = self.resource_engine.get_resource_assignments(
+                limit=args.get("limit", 50), context=ctx, activity_filter=activity_name
+            )
         elif tool == "get_resource_load":
             result = self.resource_engine.get_resource_load(context=ctx)
         else:
@@ -285,11 +311,15 @@ class XERAnalyzer:
                 suggs = ", ".join(tool_result["suggestions"])
                 err_msg = f"No exact match found. Did you mean: {suggs}?"
             
+            # Show '/help' recommendation for true zero-match empty query fallbacks, and generic search tips for disambiguations
+            has_suggestions = bool(tool_result.get("suggestions") or tool_result.get("disambiguation_candidates"))
+            recs = ["Try asking for 'delayed activities', 'critical path', or search by exact activity ID."] if has_suggestions else ["Need help? Type '/' in the input box to see quick commands, or try: 'show critical path activities'."]
+            
             return {
                 "summary": err_msg,
                 "metrics": {},
                 "insights": ["Please clarify your request or provide a more specific activity name."],
-                "recommendations": ["Try asking for 'delayed activities', 'critical path', or search by exact activity ID."],
+                "recommendations": recs,
                 "template_type": "clarify"
             }
 
@@ -333,7 +363,17 @@ class XERAnalyzer:
             f'{json.dumps(payload_to_llm, default=str)}'
         )
 
-        messages = [{"role": "system", "content": EXPLANATION_PROMPT}]
+        ctx_str = context.get("context", "audit") if isinstance(context, dict) else (context or "audit")
+        source = self.data_store.get_latest(context=ctx_str)
+        proj_name = "current project"
+        if source:
+            name_raw = source.get('name', '')
+            if name_raw.endswith(".xer"):
+                name_raw = name_raw[:-4]
+            proj_name = name_raw.split("(")[0].strip()
+            
+        sys_prompt = EXPLANATION_PROMPT.replace("{PROJECT_NAME}", proj_name)
+        messages = [{"role": "system", "content": sys_prompt}]
         messages.extend(history_ctx)
         messages.append({"role": "user", "content": user_msg})
 
@@ -407,6 +447,43 @@ class XERAnalyzer:
     # ── Main Entry ────────────────────────────────────────────────────────────
     def analyze(self, query: str, context: Optional[Dict] = None, session_id: str = "default") -> Dict:
         session = self._get_session(session_id)
+        
+        # Guard against empty, whitespace-only, or punctuation-only inputs (e.g. ".")
+        query_stripped = query.strip() if query else ""
+        
+        # Intercept help commands
+        if query_stripped.lower() in ("/help", "help", "/h", "help me"):
+            return {
+                "summary": "Here are some common ways to query the loaded schedule data:",
+                "metrics": {},
+                "insights": [
+                    "🔍 General Info: 'summarize the project' or 'what is the project status'",
+                    "⚠️ Delayed Tasks: 'show me delayed activities' or 'list delayed tasks'",
+                    "⚡ Critical Path: 'show critical path activities' or 'negative float activities'",
+                    "📊 Project Variance: 'is the electrical scope on schedule' or 'is engineering delayed'",
+                    "📍 Activity Details: 'what is the start date of [activity name/ID]'",
+                ],
+                "recommendations": [
+                    "Try: 'show critical path activities'",
+                    "Try: 'what is the status of Design'",
+                    "Try: 'is there any cost variance'"
+                ],
+                "template_type": "clarify"
+            }
+
+        if not query_stripped or re.match(r'^[^\w\s]+$', query_stripped):
+            return {
+                "summary": "I didn't catch your question. Could you tell me what activity, trade, or area you're asking about?",
+                "metrics": {},
+                "insights": ["Please provide a valid question, activity name, or WBS area."],
+                "recommendations": [
+                    "Examples: 'show me critical path activities'",
+                    "Examples: 'is the mechanical scope on schedule'",
+                    "Examples: 'what is the start date of [activity name]'"
+                ],
+                "template_type": "clarify"
+            }
+
         try:
             from .activity_resolver import resolve_followup_selection
             pending = session.get("pending_activity_selection")
@@ -456,14 +533,24 @@ class XERAnalyzer:
                     "template_type": "clarify"}
 
     # ── Tools ─────────────────────────────────────────────────────────────────
-    def get_activity_details(self, term: str, context: str = "audit") -> Dict:
+    def get_activity_details(self, term: str, context: str = "audit", version_id: Optional[str] = None) -> Dict:
         if not term: return {"success": False, "error": "No search term provided."}
-        source = self.data_store.get_latest(context=context)
+        source = self.data_store.get_latest(context=context, version_id=version_id)
         if not source: return {"success": False, "error": "No schedule data loaded."}
         df = source["df"]["tasks"]
         activities = df.to_dict('records')
         
-        from .activity_resolver import resolve_activity_reference, format_resolution_response
+        # Enrich activities with human-readable WBS path
+        from .activity_resolver import resolve_activity_reference, format_resolution_response, build_wbs_path_map
+        wbs_df = source["df"].get("projwbs")
+        wbs_path_map = build_wbs_path_map(wbs_df)
+        if wbs_path_map:
+            for act in activities:
+                wid = act.get("wbs_id")
+                if wid and str(wid) in wbs_path_map:
+                    act["wbs_path"] = wbs_path_map[str(wid)]
+                elif wid:
+                    act["wbs_path"] = str(wid)
         
         resolution = resolve_activity_reference(term, activities)
         resp = format_resolution_response(term, resolution)
@@ -483,7 +570,7 @@ class XERAnalyzer:
         combined_list = combined_list[:8]
 
         hpd = source.get("hours_per_day", 8)
-        analysis = self.data_store.get_deterministic_analysis(context=context).get("activityAnalysis", {})
+        analysis = self.data_store.get_deterministic_analysis(version_id=source['id'], context=context).get("activityAnalysis", {})
         
         full_data = []
         for r in combined_list:
@@ -505,7 +592,8 @@ class XERAnalyzer:
                 "finish": str(r.get("target_end_date", ""))[:10],
                 "float_days": round(float_hrs / hpd, 1),
                 "is_critical": float_hrs <= 0,
-                "delay_days": act_analysis.get("delay_days", 0)
+                "delay_days": act_analysis.get("delay_days"),
+                "wbs_path": r.get("wbs_path", "")
             })
             
         data_ref = self.data_store.store_result(full_data)
@@ -521,9 +609,22 @@ class XERAnalyzer:
         # Logic to filter by WBS could go here if needed, simplified for now
         return acts
 
-    def get_delayed_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None) -> Dict:
-        analysis = self.data_store.get_deterministic_analysis(context=context)
-        source = self.data_store.get_latest(context=context)
+    def _get_wbs_map(self, source: Dict) -> Dict:
+        if not source: return {}
+        if "wbs_path_map" in source: return source["wbs_path_map"]
+        from .activity_resolver import build_wbs_path_map
+        wbs_df = source.get("df", {}).get("projwbs")
+        wbs_map = build_wbs_path_map(wbs_df)
+        source["wbs_path_map"] = wbs_map
+        return wbs_map
+
+    def get_delayed_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        if source and source.get("type") == "baseline":
+            return {"success": False, "error": "Cannot compute delays or list delayed activities because only the baseline schedule is loaded. Delay analysis requires actual progress updates."}
+            
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         acts = analysis.get("activityAnalysis", {})
         acts = self._filter_wbs(acts, wbs_filter, source)
         
@@ -531,7 +632,9 @@ class XERAnalyzer:
         sorted_acts = sorted(delayed.items(), key=lambda x: x[1].get("delay_days", 0), reverse=True)
         hpd = source.get("hours_per_day", 8) if source else 8
         
+        wbs_map = self._get_wbs_map(source)
         full_data = [{"id": tid, "code": a.get("task_code",""), "name": a.get("task_name",""),
+                      "wbs_path": wbs_map.get(str(a.get("wbs_id")), str(a.get("wbs_id", ""))),
                       "delay_days": a.get("delay_days", 0),
                       "float_days": round(a.get("float_hrs", 0) / hpd, 1),
                       "status": a.get("status_enum","")} for tid, a in sorted_acts]
@@ -545,10 +648,11 @@ class XERAnalyzer:
                 "stats": {"max_delay_days": max(delays) if delays else 0,
                           "avg_delay_days": round(sum(delays)/len(delays), 1) if delays else 0}}
 
-    def get_critical_path(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None) -> Dict:
+    def get_critical_path(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
         from .scheduler_metrics import SchedulerMetrics
-        analysis = self.data_store.get_deterministic_analysis(context=context)
-        source = self.data_store.get_latest(context=context)
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         acts = analysis.get("activityAnalysis", {})
         acts = self._filter_wbs(acts, wbs_filter, source)
         
@@ -559,7 +663,9 @@ class XERAnalyzer:
         sorted_acts = sorted(critical.items(), key=lambda x: x[1].get("float_hrs", 0))
         hpd = source.get("hours_per_day", 8) if source else 8
         
+        wbs_map = self._get_wbs_map(source)
         full_data = [{"id": tid, "code": a.get("task_code",""), "name": a.get("task_name",""),
+                      "wbs_path": wbs_map.get(str(a.get("wbs_id")), str(a.get("wbs_id", ""))),
                       "float_days": round(a.get("float_hrs", 0) / hpd, 1),
                       "delay_days": a.get("delay_days", 0)} for tid, a in sorted_acts]
         
@@ -571,9 +677,10 @@ class XERAnalyzer:
                 "stats": {"total_critical": len(full_data),
                           "neg_float_count": sum(1 for a in critical.values() if a.get("float_hrs",0) < 0)}}
 
-    def get_negative_float_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None) -> Dict:
-        analysis = self.data_store.get_deterministic_analysis(context=context)
-        source = self.data_store.get_latest(context=context)
+    def get_negative_float_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         acts = analysis.get("activityAnalysis", {})
         acts = self._filter_wbs(acts, wbs_filter, source)
         
@@ -581,7 +688,9 @@ class XERAnalyzer:
         sorted_acts = sorted(neg.items(), key=lambda x: x[1].get("float_hrs", 0))
         hpd = source.get("hours_per_day", 8) if source else 8
         
+        wbs_map = self._get_wbs_map(source)
         full_data = [{"id": tid, "code": a.get("task_code",""), "name": a.get("task_name",""),
+                      "wbs_path": wbs_map.get(str(a.get("wbs_id")), str(a.get("wbs_id", ""))),
                       "float_days": round(a.get("float_hrs", 0) / hpd, 1),
                       "delay_days": a.get("delay_days", 0)} for tid, a in sorted_acts]
         
@@ -593,9 +702,10 @@ class XERAnalyzer:
                 "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
                 "stats": {"worst_float_days": round(min(floats), 1) if floats else 0}}
 
-    def get_positive_float_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None) -> Dict:
-        analysis = self.data_store.get_deterministic_analysis(context=context)
-        source = self.data_store.get_latest(context=context)
+    def get_positive_float_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         acts = analysis.get("activityAnalysis", {})
         acts = self._filter_wbs(acts, wbs_filter, source)
         
@@ -603,7 +713,9 @@ class XERAnalyzer:
         sorted_acts = sorted(pos.items(), key=lambda x: x[1].get("float_hrs", 0), reverse=True)
         hpd = source.get("hours_per_day", 8) if source else 8
         
+        wbs_map = self._get_wbs_map(source)
         full_data = [{"id": tid, "code": a.get("task_code",""), "name": a.get("task_name",""),
+                      "wbs_path": wbs_map.get(str(a.get("wbs_id")), str(a.get("wbs_id", ""))),
                       "float_days": round(a.get("float_hrs", 0) / hpd, 1),
                       "delay_days": a.get("delay_days", 0)} for tid, a in sorted_acts]
         
@@ -615,23 +727,26 @@ class XERAnalyzer:
                 "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
                 "stats": {"max_float_days": round(max(floats), 1) if floats else 0}}
 
-    def get_project_health(self, context: str = "audit") -> Dict:
-        analysis = self.data_store.get_deterministic_analysis(context=context)
+    def get_project_health(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         summary = analysis.get("projectSummary", {})
         health = summary.get("healthMetrics", {})
         return {"success": True, "total_count": 1, "displayed_count": 1,
                 "data": [], "display_items": [], "all_items": [], "stats": {"score": health.get("projectHealthScore", 0),
                                       "status": health.get("healthStatus", "Unknown"),
                                       "delay_days": summary.get("projectDelayDays", 0),
-                                      "issues": health.get("qualityIssues", [])}, "template_type": "health"}
+                                      "issues": health.get("qualityIssues", []),
+                                      "assessment_details": summary.get("assessment", [])}, "template_type": "health"}
 
-    def get_project_summary(self, context: str = "audit") -> Dict:
+    def get_project_summary(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
         from .scheduler_metrics import SchedulerMetrics
-        source = self.data_store.get_latest(context=context)
+        source = self.data_store.get_latest(context=context, version_id=version_id)
         if not source:
             return {"success": False, "error": "No schedule data loaded."}
             
-        analysis = self.data_store.get_deterministic_analysis(context=context)
+        analysis = self.data_store.get_deterministic_analysis(version_id=source['id'], context=context)
         df = source.get("df", {}).get("tasks")
         if df is None or df.empty:
             return {"success": False, "error": "No tasks in schedule."}
@@ -688,13 +803,27 @@ class XERAnalyzer:
         except Exception:
             duration_days = 0
             
+        # Count delayed and completed activities
+        delayed_acts = {tid: a for tid, a in acts.items() if a.get("delay_days") is not None and a.get("delay_days", 0) > 0 and a.get("status_enum") != "COMPLETED"}
+        completed_acts = {tid: a for tid, a in acts.items() if a.get("status_enum") == "COMPLETED"}
+        in_progress_acts = {tid: a for tid, a in acts.items() if a.get("status_enum") == "IN_PROGRESS"}
+        project_summary = analysis.get("projectSummary", {})
+        project_delay_days = project_summary.get("projectDelayDays")
+        delays = [a.get("delay_days") for a in delayed_acts.values() if a.get("delay_days") is not None]
+        
         summary_data = {
             "project_start": es,
             "project_finish": lf,
             "total_duration_days": duration_days,
             "total_activities": total_acts,
             "critical_count": critical_count,
-            "non_critical_count": total_acts - critical_count
+            "non_critical_count": total_acts - critical_count,
+            "completed_activities": len(completed_acts),
+            "in_progress_activities": len(in_progress_acts),
+            "delayed_activities": len(delayed_acts) if project_delay_days is not None else None,
+            "project_delay_days": project_delay_days,
+            "max_delay_days": max(delays) if delays else (None if project_delay_days is None else 0),
+            "avg_delay_days": round(sum(delays) / len(delays), 1) if delays else (None if project_delay_days is None else 0)
         }
         
         return {
@@ -709,8 +838,10 @@ class XERAnalyzer:
             "template_type": "health"
         }
 
-    def check_integrity(self, context: str = "audit") -> Dict:
-        analysis = self.data_store.get_deterministic_analysis(context=context)
+    def check_integrity(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         assessment = analysis.get("projectSummary", {}).get("assessment", [])
         logic = next((a for a in assessment if a["id"] == 1), {})
         leads = next((a for a in assessment if a["id"] == 2), {})
@@ -726,8 +857,10 @@ class XERAnalyzer:
                     "hard_constraints_pct": round(float(hard.get("val", 0)), 2)
                 }, "template_type": "integrity"}
 
-    def check_open_ends(self, context: str = "audit") -> Dict:
-        analysis = self.data_store.get_deterministic_analysis(context=context)
+    def check_open_ends(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         assessment = analysis.get("projectSummary", {}).get("assessment", [])
         logic = next((a for a in assessment if a["id"] == 1), {})
         details = logic.get("details", {})
@@ -750,8 +883,10 @@ class XERAnalyzer:
                     "open_finish_names": finish_names
                 }, "template_type": "integrity"}
 
-    def check_constraints(self, context: str = "audit") -> Dict:
-        analysis = self.data_store.get_deterministic_analysis(context=context)
+    def check_constraints(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         assessment = analysis.get("projectSummary", {}).get("assessment", [])
         hard  = next((a for a in assessment if a["id"] == 5), {})
         return {"success": True, "total_count": 1, "displayed_count": 1,
@@ -767,13 +902,13 @@ class XERAnalyzer:
                     "status": "PASS"
                 }, "template_type": "integrity"}
 
-    def check_path_continuity(self, context: str = "audit") -> Dict:
+    def check_path_continuity(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
         from .scheduler_metrics import SchedulerMetrics
-        source = self.data_store.get_latest(context=context)
+        source = self.data_store.get_latest(context=context, version_id=version_id)
         if not source:
             return {"success": False, "error": "No data found."}
             
-        analysis = self.data_store.get_deterministic_analysis(context=context)
+        analysis = self.data_store.get_deterministic_analysis(version_id=source['id'], context=context)
         acts = analysis.get("activityAnalysis", {})
         graph = source.get("dependency_graph", {})
         
@@ -799,7 +934,7 @@ class XERAnalyzer:
             "error": res.get("reason") if not res.get("success") else None
         }
 
-    def get_wbs_summary(self, wbs_name: Optional[str] = None, context: str = "audit") -> Dict:
+    def get_wbs_summary(self, wbs_name: Optional[str] = None, context: str = "audit", version_id: Optional[str] = None) -> Dict:
         data = self.data_store.get_wbs_summary(target_level=2, context=context)
         if wbs_name:
             import pandas as pd
@@ -810,20 +945,25 @@ class XERAnalyzer:
         return {"success": True, "total_count": len(data), "displayed_count": len(data),
                 "is_truncated": False, "data": data, "display_items": data, "all_items": data, "stats": {"total_nodes": len(data)}}
 
-    def analyze_activity_delay(self, activity_name: str, context: str = "audit") -> Dict:
+    def analyze_activity_delay(self, activity_name: str, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        if source and source.get("type") == "baseline":
+            return {"success": False, "error": f"Cannot compute schedule variance or delay for '{activity_name}' because only the baseline schedule is loaded. Variance requires actual progress data. Per the baseline, the activity is scheduled to start on and finish on baseline dates. To assess if it's delayed or ahead, please upload an update file."}
+            
         # Resolve activity by name first
-        res = self.get_activity_details(activity_name, context=context)
+        res = self.get_activity_details(activity_name, context=context, version_id=version_id)
         if not res.get("success") or not res.get("data"):
             return res
         
         act = res["data"][0]
         activity_id = act["id"]
-        source = self.data_store.get_latest(context=context)
+        source = self.data_store.get_latest(context=context, version_id=version_id)
         graph = (source or {}).get("dependency_graph", {})
         node = graph.get(activity_id, {})
         
         act_data = [{
                     "id": activity_id, "code": act["code"], "name": act["name"],
+                    "wbs_path": act.get("wbs_path", ""),
                     "delay_days": act["delay_days"], "float_days": act["float_days"],
                     "is_critical": act["is_critical"],
                     "predecessors": node.get("predecessors", [])[:5],

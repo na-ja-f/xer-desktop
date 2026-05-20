@@ -124,7 +124,7 @@ export default function ViewAllModal({ isOpen, onClose, title, data = [], dataRe
                 {paginated.map((row, i) => {
                   const cat = row.category || row.status || 'DEFAULT';
                   const colorClass = STATUS_COLORS[cat] || STATUS_COLORS.DEFAULT;
-                  const delay = row.delay_days || 0;
+                  const delayVal = row.delay_days;
                   const float_ = row.float_days ?? '-';
                   return (
                     <tr key={row.id || i} className="hover:bg-blue-50/30 transition-colors">
@@ -135,7 +135,9 @@ export default function ViewAllModal({ isOpen, onClose, title, data = [], dataRe
                           {row.status || '-'}
                         </span>
                       </td>
-                      <td className="px-6 py-3 text-sm font-bold text-red-600">{delay > 0 ? `${delay}d` : '-'}</td>
+                      <td className="px-6 py-3 text-sm font-bold text-gray-500">
+                        {delayVal === null || delayVal === undefined ? 'N/A' : (delayVal > 0 ? `${delayVal}d` : '-')}
+                      </td>
                       <td className={`px-6 py-3 text-sm font-bold ${float_ < 0 ? 'text-red-500' : 'text-gray-600'}`}>{float_ !== '-' ? `${float_}d` : '-'}</td>
                       <td className="px-6 py-3 text-xs text-gray-500 font-mono">{row.finish || '-'}</td>
                     </tr>

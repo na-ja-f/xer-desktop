@@ -95,7 +95,13 @@ function ListTemplate({ content }) {
       {content.display_items && content.display_items.length > 0 && (
         <div className="mt-2 space-y-2">
           {content.display_items.map((item, idx) => {
-            const label = content.display_title || RESPONSE_LABELS[content.type] || item.name || item.task_name || item.discipline || null;
+            const itemName = item.name || item.task_name || item.discipline || null;
+            const label = content.display_title || itemName || RESPONSE_LABELS[content.type] || null;
+            const isWbsPathKey = (key) => {
+              const norm = key.toLowerCase().replace(/_/g, '').replace(/\s+/g, '');
+              return norm === 'wbspath' || norm === 'wbspath:';
+            };
+            
             return (
               <div key={idx} className="p-3 bg-white border border-gray-100 rounded-xl shadow-sm text-xs flex flex-col gap-1">
                 {label && (
@@ -104,25 +110,59 @@ function ListTemplate({ content }) {
                     {item.id && <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded flex-shrink-0 font-mono">{item.code || item.id}</span>}
                   </div>
                 )}
-              <div className="flex flex-wrap gap-2 text-[10px] mt-1 font-medium text-gray-500">
-                {Object.entries(item).map(([k, v]) => {
-                  if (['id', 'code', 'name', 'task_name', 'discipline'].includes(k)) return null;
-                  if (v === null || v === undefined || typeof v === 'object') return null;
-                  return (
-                    <span key={k} className="bg-gray-50 border border-gray-100 px-2 py-0.5 rounded-md">
-                      <span className="capitalize text-gray-400 mr-1">{k.replace(/_/g, ' ')}:</span>
-                      <span className="text-gray-700">{String(v)}</span>
-                    </span>
-                  );
-                })}
+                <div className="flex flex-wrap gap-2 text-[10px] mt-1 font-medium text-gray-500">
+                  {Object.entries(item).map(([k, v]) => {
+                    if (['id', 'code', 'name', 'task_name', 'discipline'].includes(k) || isWbsPathKey(k)) return null;
+                    
+                    let displayVal = String(v);
+                    if (k === 'delay_days' && (v === null || v === undefined)) {
+                      displayVal = "N/A (requires update file)";
+                    } else if (v === null || v === undefined || typeof v === 'object') {
+                      return null;
+                    }
+                    
+                    let labelText = k.replace(/_/g, ' ');
+                    const overrides = {
+                      'wbs': 'WBS',
+                      'wbs_id': 'WBS ID',
+                      'wbs_path': 'WBS Path',
+                      'float_hrs': 'Float Hrs',
+                      'delay_days': 'Delay Days',
+                      'is_critical': 'Is Critical'
+                    };
+                    if (overrides[k]) {
+                      labelText = overrides[k];
+                    } else {
+                      labelText = labelText.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                    }
+                    
+                    return (
+                      <span key={k} className="bg-gray-50 border border-gray-100 px-2 py-0.5 rounded-md">
+                        <span className="text-gray-400 mr-1">{labelText}:</span>
+                        <span className="text-gray-700">{displayVal}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+                {(() => {
+                  const wbsEntry = Object.entries(item).find(([k]) => isWbsPathKey(k));
+                  if (wbsEntry && wbsEntry[1]) {
+                    return (
+                      <div className="text-[10px] mt-2 pt-2 border-t border-gray-100/60 text-gray-500 font-medium">
+                        <span className="text-gray-400 mr-1.5 font-bold">WBS Path:</span>
+                        <span className="text-gray-700 font-semibold break-all bg-gray-50/50 px-2 py-1 rounded border border-gray-100/50 inline-block w-full">{String(wbsEntry[1])}</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
-            </div>
-          )})}
+            )})}
         </div>
       )}
 
-      {/* Metrics Grid */}
-      {Object.keys(metrics).length > 0 && (
+      {/* Metrics Grid - Hidden for activity detail responses to avoid redundant/inconsistent tiles */}
+      {Object.keys(metrics).length > 0 && !['get_activity_details', 'analyze_activity_delay', 'get_project_summary', 'get_project_metrics'].includes(content.type) && !(content.display_items && content.display_items.length > 0) && (
         <div className="grid grid-cols-2 gap-2.5">
           {Object.entries(metrics).map(([k, v]) => (
             <div key={k} className="bg-blue-50 border border-blue-100 p-3 rounded-xl">

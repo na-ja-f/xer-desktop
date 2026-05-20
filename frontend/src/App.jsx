@@ -56,6 +56,8 @@ function App() {
   const [controllerChatPos, setControllerChatPos] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
   const dragStartPos = useRef({ x: 0, y: 0 })
+  const chatContainerRef = useRef(null)
+  const posRef = useRef({ x: 0, y: 0 })
   
   const chatEndRef = useRef(null)
   const controllerChatEndRef = useRef(null)
@@ -81,12 +83,17 @@ function App() {
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (!isDragging) return
-      setControllerChatPos({
-        x: e.clientX - dragStartPos.current.x,
-        y: e.clientY - dragStartPos.current.y
-      })
+      const newX = e.clientX - dragStartPos.current.x
+      const newY = e.clientY - dragStartPos.current.y
+      posRef.current = { x: newX, y: newY }
+      if (chatContainerRef.current) {
+        chatContainerRef.current.style.transform = `translate(${newX}px, ${newY}px)`
+      }
     }
-    const handleMouseUp = () => setIsDragging(false)
+    const handleMouseUp = () => {
+      setIsDragging(false)
+      setControllerChatPos({ ...posRef.current })
+    }
     
     if (isDragging) {
       window.addEventListener('mousemove', handleMouseMove)
@@ -103,8 +110,8 @@ function App() {
     if (e.target.closest('button')) return
     setIsDragging(true)
     dragStartPos.current = { 
-      x: e.clientX - controllerChatPos.x, 
-      y: e.clientY - controllerChatPos.y 
+      x: e.clientX - posRef.current.x, 
+      y: e.clientY - posRef.current.y 
     }
   }
 
@@ -681,6 +688,7 @@ function App() {
               isControllerTyping={isControllerTyping}
               controllerChatEndRef={controllerChatEndRef}
               handleControllerAsk={handleControllerAsk}
+              chatContainerRef={chatContainerRef}
             />
           </div>
         ) : null}

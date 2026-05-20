@@ -196,10 +196,13 @@ class XERDataStore:
         vid = version_id or ctx["active_version_id"]
         return ctx["versions"].get(vid)
 
-    def get_latest(self, context: str = "audit") -> Optional[Dict]:
+    def get_latest(self, context: str = "audit", version_id: Optional[str] = None) -> Optional[Dict]:
         ctx = self.contexts.get(context, self.contexts["audit"])
         versions = ctx["versions"]
         if not versions: return None
+        # If a specific version_id is requested, return it directly
+        if version_id and version_id in versions:
+            return versions[version_id]
         # Sort updates by date and get latest
         updates = [v for v in versions.values() if v['type'] == 'update']
         if updates:
@@ -345,6 +348,7 @@ class XERDataStore:
         if not source or 'df' not in source or 'tasks' not in source['df']:
             return {}
 
+        is_baseline_only = (source.get('type') == 'baseline')
         df = source['df']['tasks'].copy()
         baseline_map = self._get_baseline_map(context=context)
         
@@ -408,6 +412,9 @@ class XERDataStore:
 
         # 3. Precision P6 Delay Calculation (BASELINE vs UPDATE PLANNED)
         def calc_p6_delay(row):
+            if is_baseline_only:
+                return None
+                
             code = row.get('task_code')
             baseline_finish = baseline_map.get(code)
             
@@ -439,7 +446,7 @@ class XERDataStore:
                 
             delay = row['delay_days']
             flt = row['float_hrs']
-            if delay > 0:
+            if delay is not None and delay > 0:
                 if flt > 0: return "DELAYED_SAFE"
                 if flt == 0: return "DELAYED_CRITICAL"
                 if flt < 0: return "DELAYED_NEGATIVE"
@@ -463,12 +470,14 @@ class XERDataStore:
             # We take the absolute value of the worst negative float
             max_neg_float_days = abs(df['float_hrs'].min() / self.hours_per_day)
 
-        project_delay_days = finish_variance
         is_constrained = False
-        
-        if finish_variance <= 0 and max_neg_float_days > 0:
-            is_constrained = True
-            project_delay_days = round(max_neg_float_days, 0)
+        if is_baseline_only:
+            project_delay_days = None
+        else:
+            project_delay_days = finish_variance
+            if finish_variance <= 0 and max_neg_float_days > 0:
+                is_constrained = True
+                project_delay_days = round(max_neg_float_days, 0)
 
         # 6. DCMA 14-Point Assessment Logic
         total_tasks = len(df)
@@ -483,9 +492,12 @@ class XERDataStore:
         incomplete_tasks = df[df['status_enum'] != 'COMPLETED']
         total_incomplete = len(incomplete_tasks)
         
-        # Check 1: Logic (Open Ends)
+        # Check 1: Logic (Missing Predecessors/Successors)
         has_pred = set(preds_df['task_id'].unique()) if not preds_df.empty else set()
         has_succ = set(preds_df['pred_task_id'].unique()) if not preds_df.empty else set()
+        
+        missing_logic_tasks = incomplete_tasks[(~incomplete_tasks['task_id'].isin(has_pred)) | (~incomplete_tasks['task_id'].isin(has_succ))]
+        missing_logic_count = len(missing_logic_tasks)
         
         open_starts = incomplete_tasks[~incomplete_tasks['task_id'].isin(has_pred)]
         open_finishes = incomplete_tasks[~incomplete_tasks['task_id'].isin(has_succ)]
@@ -495,26 +507,21 @@ class XERDataStore:
         open_start_names = open_starts['task_name'].tolist()
         open_finish_names = open_finishes['task_name'].tolist()
         
-        if open_start_count == 1 and open_finish_count == 1:
+        # DCMA allows exceptions for Project Start/Finish
+        allowed_exceptions = 0
+        if open_start_count > 0: allowed_exceptions += 1
+        if open_finish_count > 0: allowed_exceptions += 1
+        
+        adjusted_missing = max(0, missing_logic_count - allowed_exceptions)
+        pt1_val = (adjusted_missing / total_incomplete * 100) if total_incomplete > 0 else 0
+        pt1_val = round(pt1_val, 2)
+        
+        if pt1_val <= 5:
             logic_status_str = "PASS"
-            logic_explanation = "Valid schedule structure with single start and finish"
-            pt1_val = 0.0 # Standard metric
-        elif open_start_count > 1 or open_finish_count > 1:
-            logic_status_str = "FAIL"
-            logic_explanation = f"Multiple open ends: {open_start_count} starts, {open_finish_count} finishes."
-            pt1_val = float(open_start_count + open_finish_count)
+            logic_explanation = "Valid schedule logic coverage"
         else:
-            logic_status_str = "WARNING"
-            logic_explanation = "Incomplete logic structure detected."
-            pt1_val = 100.0
-            
-        # Additional validation: Earliest/Latest check
-        if logic_status_str == "PASS":
-            is_earliest = open_starts['_dt_target_start_date'].min() == df['_dt_target_start_date'].min()
-            is_latest = open_finishes['_dt_target_end_date'].max() == df['_dt_target_end_date'].max()
-            if not (is_earliest and is_latest):
-                logic_status_str = "WARNING"
-                logic_explanation = "Open ends are valid in count but not at project boundaries."
+            logic_status_str = "FAIL"
+            logic_explanation = f"Incomplete logic structure ({adjusted_missing} tasks lacking complete logic)."
         
         # Check 2: Leads (Negative Lag)
         leads_count = len(preds_df[pd.to_numeric(preds_df['lag_hr_cnt'], errors='coerce') < 0]) if not preds_df.empty else 0
@@ -623,21 +630,39 @@ class XERDataStore:
         score = 100
         issues = []
         
-        if pt1_val > 5: score -= 10; issues.append("Missing schedule logic")
-        if pt2_val > 0: score -= 10; issues.append("Negative lags (leads) detected")
-        if pt7_val > 0: score -= 20; issues.append("Negative float (behind schedule)")
-        if pt5_val > 5: score -= 10; issues.append("Excessive hard constraints")
+        if pt1_val > 5: score -= 10; issues.append(f"Missing schedule logic ({pt1_val}% of tasks lack complete predecessors/successors)")
+        if pt2_val > 0: score -= 10; issues.append(f"Negative lags (leads) detected ({pt2_val}%)")
+        if pt3_val > 5: score -= 5; issues.append(f"Excessive positive lags ({pt3_val}%)")
+        if pt4_val < 90: score -= 5; issues.append(f"Insufficient Finish-to-Start relationships ({pt4_val}%)")
+        if pt5_val > 5: score -= 10; issues.append(f"Excessive hard constraints ({pt5_val}%)")
+        if pt6_val > 5: score -= 5; issues.append(f"High float activities > 44 days ({pt6_val}%)")
+        if pt7_val > 0: score -= 20; issues.append(f"Negative float / Behind schedule ({pt7_val}%)")
+        if pt8_val > 5: score -= 5; issues.append(f"High duration activities > 44 days ({pt8_val}%)")
+        if pt11_val > 5: score -= 10; issues.append(f"Missed tasks / Finished late ({pt11_val}%)")
+        if critical_count == 0: score -= 10; issues.append("No critical path detected")
+        if pt13_val < 0.95: score -= 5; issues.append(f"Low Critical Path Length Index (CPLI {pt13_val})")
+        if not baseline_map: issues.append("No baseline assigned for variance tracking")
+        
+        if project_delay_days is not None and project_delay_days > 0:
+            score -= 15
+            issues.append(f"Project is delayed by {project_delay_days} days")
             
         if is_constrained:
             score -= 10
             issues.append("Project delay hidden by constraints (Fixed finish date detected)")
+            
+        score = max(0, score)
 
         health_status = "Good"
         if score < 65: health_status = "Critical"
         elif score < 85: health_status = "Warning"
 
         # 8. Root Cause Extraction
-        top_delay_drivers = df[df['delay_days'] > 0].sort_values('delay_days', ascending=False).head(20)
+        numeric_delays = pd.to_numeric(df['delay_days'], errors='coerce').fillna(0)
+        top_delay_drivers = df[numeric_delays > 0].copy()
+        if not top_delay_drivers.empty:
+            top_delay_drivers = top_delay_drivers.sort_values('delay_days', ascending=False).head(20)
+            
         top_neg_float = df[df['float_hrs'] < 0].sort_values('float_hrs').head(20)
 
         metrics = {
@@ -645,7 +670,7 @@ class XERDataStore:
             "completedTasks": len(df[df['status_enum'] == "COMPLETED"]),
             "inProgressTasks": len(df[df['status_enum'] == "IN_PROGRESS"]),
             "notStartedTasks": len(df[df['status_enum'] == "NOT_STARTED"]),
-            "delayedTasks": len(df[df['delay_days'] > 0]),
+            "delayedTasks": int((numeric_delays > 0).sum()),
             "criticalCount": critical_count,
             "negativeFloatCount": neg_float_count,
             "projectHealthScore": score,
@@ -664,7 +689,7 @@ class XERDataStore:
         return {
             "projectSummary": {
                 "projectDelayDays": project_delay_days,
-                "isDelayed": project_delay_days > 0,
+                "isDelayed": (project_delay_days > 0) if project_delay_days is not None else False,
                 "healthMetrics": metrics,
                 "delayFloatMatrix": matrix_summary,
                 "assessment": assessment,
@@ -679,10 +704,10 @@ class XERDataStore:
         baseline = self.get_baseline(context=context)
         latest = self.get_latest(context=context)
         if not baseline or not latest or baseline['id'] == latest['id']:
-            return {"delay_days": 0, "reason": "No baseline or update available for comparison."}
+            return {"delay_days": None, "reason": "No baseline or update available for comparison."}
         
         baseline_finish = pd.to_datetime(baseline['data_date'])
-        stats = self.compute_basic_stats(context=context)
+        stats = self.compute_basic_stats(version_id=baseline['id'], context=context)
         if 'project_finish' in stats:
             baseline_finish = pd.to_datetime(stats['project_finish'])
             

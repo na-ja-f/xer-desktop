@@ -38,7 +38,7 @@ const TaskRow = React.memo(({ task, formatP6Date }) => {
         
         <div className="flex-1 px-2 text-[10px] font-semibold text-gray-900 truncate">{task.task_name}</div>
         <div className="w-24 shrink-0 px-1 flex justify-start">
-          <span title={`Delay: ${analysis.delay_days || 0} days`} className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-tight shadow-sm cursor-help ${statusConfig.color}`}>
+          <span title={analysis.delay_days !== null && analysis.delay_days !== undefined ? `Delay: ${analysis.delay_days} days` : 'Delay: N/A (requires update file)'} className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-tight shadow-sm cursor-help ${statusConfig.color}`}>
             {statusConfig.icon}
             {statusConfig.label}
           </span>

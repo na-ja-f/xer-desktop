@@ -1,6 +1,7 @@
 import difflib
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import pandas as pd
 
 AUTO_ANSWER_THRESHOLD = 0.85
 
@@ -25,6 +26,45 @@ def rank_by_criticality(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return (tf, name)
     return sorted(matches, key=sort_key)
 
+def build_wbs_path_map(wbs_df) -> Dict[str, str]:
+    """Builds a map of wbs_id -> human-readable WBS path like 'PROCUREMENT > SUB-CONTRACTOR > APPROVALS-PREQUALIFICATION'."""
+    if wbs_df is None or wbs_df.empty:
+        return {}
+    try:
+        parent_map = wbs_df.set_index('wbs_id')['parent_wbs_id'].to_dict()
+        # Prefer wbs_name (full descriptive) over wbs_short_name (often just a number)
+        if 'wbs_name' in wbs_df.columns:
+            name_map = wbs_df.set_index('wbs_id')['wbs_name'].to_dict()
+        else:
+            name_map = wbs_df.set_index('wbs_id')['wbs_short_name'].to_dict()
+    except Exception:
+        return {}
+    
+    path_cache = {}
+    
+    def _get_path(wbs_id):
+        if wbs_id in path_cache:
+            return path_cache[wbs_id]
+        parts = []
+        curr = wbs_id
+        seen = set()
+        while curr and curr in name_map and curr not in seen:
+            seen.add(curr)
+            label = str(name_map.get(curr, "")).strip()
+            # Only include meaningful labels (skip pure numbers and empty strings)
+            if label and not label.replace("-", "").replace(".", "").isdigit():
+                parts.append(label)
+            curr = parent_map.get(curr)
+        parts.reverse()
+        # Skip the root project node (first element) if path has depth
+        if len(parts) > 1:
+            parts = parts[1:]
+        path = " > ".join(parts) if parts else "N/A"
+        path_cache[wbs_id] = path
+        return path
+    
+    return {wid: _get_path(wid) for wid in name_map}
+
 def format_activity_candidates(matches: List[Dict[str, Any]], limit: int = 5) -> str:
     """Formats a list of activity candidates into a readable string."""
     if not matches:
@@ -33,12 +73,12 @@ def format_activity_candidates(matches: List[Dict[str, Any]], limit: int = 5) ->
     for idx, act in enumerate(matches[:limit], start=1):
         act_name = act.get("task_name", act.get("name", "Unknown Name"))
         act_code = act.get("task_code", act.get("id", "UNKNOWN"))
-        wbs_id = act.get("wbs_id", "N/A")
+        wbs_path = act.get("wbs_path", act.get("wbs_id", "N/A"))
         
         lines.append(
             f"{idx}. **{act_name}**  \n"
             f"   Activity ID: `{act_code}`  \n"
-            f"   WBS: `{wbs_id}`"
+            f"   WBS: {wbs_path}"
         )
     return "\n\n".join(lines)
 
@@ -63,6 +103,11 @@ def resolve_followup_selection(query: str, candidates: List[Dict[str, Any]]) -> 
     
     # Strip filler words safely (e.g. "second one" -> "second")
     cleaned_query = re.sub(r'\b(the|one|activity|option)\b', '', query_lower).strip()
+    
+    # 2.5 Positive affirmation for single-candidate fuzzy matches ("Did you mean X?" -> "yes")
+    affirmations = ["yes", "y", "yeah", "yep", "correct", "right", "sure"]
+    if len(candidates) == 1 and cleaned_query in affirmations:
+        return candidates[0]
     
     # Exact token match
     tokens = cleaned_query.split()
@@ -157,8 +202,14 @@ def resolve_activity_reference(query: str, activities: List[Dict[str, Any]], thr
         best_match = fuzzy_candidates[0]
         score = difflib.SequenceMatcher(None, norm_query, best_match).ratio()
         fuzzy_matches = []
-        for cand in fuzzy_candidates:
-            fuzzy_matches.extend(act_names_map[cand])
+        
+        # If we have a very strong top match, ONLY return activities for that specific name
+        if score >= AUTO_ANSWER_THRESHOLD:
+            fuzzy_matches.extend(act_names_map[best_match])
+        else:
+            # Otherwise, return all close candidates for disambiguation
+            for cand in fuzzy_candidates:
+                fuzzy_matches.extend(act_names_map[cand])
             
         return {
             "matches": rank_by_criticality(fuzzy_matches),
@@ -207,17 +258,17 @@ def format_resolution_response(query: str, resolution: Dict[str, Any]) -> Dict[s
             }
     elif 0.70 <= conf < AUTO_ANSWER_THRESHOLD:
         if mtype == "fuzzy":
-            name = matches[0].get("task_name", matches[0].get("name", ""))
+            cand = format_activity_candidates(matches, limit=1)
             return {
                 "status": "disambiguate",
-                "message": f"No exact matches found for '{query}'. Did you mean '{name}'?"
+                "message": f"No exact matches found for '{query}'. Did you mean:\n\n{cand}"
             }
         else:
             if len(matches) == 1:
-                name = matches[0].get("task_name", matches[0].get("name", ""))
+                cand = format_activity_candidates(matches, limit=1)
                 return {
                     "status": "disambiguate",
-                    "message": f"I found a partial match for '{name}'. Is this what you meant?"
+                    "message": f"I found a partial match. Is this what you meant?\n\n{cand}"
                 }
             elif 2 <= len(matches) <= 5:
                 cands = format_activity_candidates(matches, limit=5)

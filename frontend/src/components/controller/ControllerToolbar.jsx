@@ -126,7 +126,7 @@ const ControllerToolbar = ({
             <div className="px-4 py-2 bg-white rounded-xl border border-gray-200 shadow-sm flex items-center gap-3">
               <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Project Variance:</span>
               <span className={`text-sm font-black ${tableData.projectAnalysis.projectDelayDays > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                {tableData.projectAnalysis.projectDelayDays} DAYS
+                {tableData.projectAnalysis.projectDelayDays ?? 0} DAYS
               </span>
               {tableData.projectAnalysis.healthMetrics?.isConstrained && (
                 <span className="text-[10px] font-black text-red-700 bg-red-50 px-2 py-0.5 rounded border border-red-100 animate-pulse">

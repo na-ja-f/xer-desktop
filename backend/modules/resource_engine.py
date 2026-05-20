@@ -69,10 +69,11 @@ class ResourceEngine:
         }
 
     def get_resource_assignments(
-        self, limit: int = 500, context: str = "audit"
+        self, limit: int = 500, context: str = "audit", activity_filter: str = ""
     ) -> Dict:
         """
         Returns activity-level resource assignments with WBS, role, units, and dates.
+        If activity_filter is provided, only returns resources for matching activities.
         """
         source = self._get_source(context)
         if not source:
@@ -156,6 +157,23 @@ class ResourceEngine:
                 "start":         start,
                 "finish":        finish,
             })
+
+        # Filter by activity name if requested
+        if activity_filter and activity_filter.strip():
+            filter_lower = activity_filter.strip().lower()
+            # Try exact code match first, then name substring
+            filtered = [a for a in assignments if filter_lower == a["activity_name"].lower() 
+                        or filter_lower in a["activity_name"].lower()
+                        or filter_lower == a.get("activity_id", "").lower()]
+            if not filtered:
+                # Fuzzy fallback
+                import difflib
+                names = list({a["activity_name"] for a in assignments})
+                close = difflib.get_close_matches(activity_filter, names, n=3, cutoff=0.5)
+                if close:
+                    filtered = [a for a in assignments if a["activity_name"] in close]
+            if filtered:
+                assignments = filtered
 
         # Sort: resource → wbs → activity
         assignments.sort(key=lambda x: (x["resource_name"], x["wbs_name"], x["activity_name"]))
