@@ -158,9 +158,14 @@ def resolve_activity_reference(query: str, activities: List[Dict[str, Any]], thr
             startswith_matches.append(act)
             continue
             
-        # 4. Partial substring
-        if norm_query in norm_name:
-            contains_matches.append(act)
+        # 4. Partial substring — ALL query words must appear in the activity name
+        query_tokens = norm_query.split()
+        if len(query_tokens) > 1:
+            if all(token in norm_name for token in query_tokens):
+                contains_matches.append(act)
+        else:
+            if norm_query in norm_name:
+                contains_matches.append(act)
             
     if exact_id_matches:
         return {

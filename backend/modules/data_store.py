@@ -726,6 +726,43 @@ class XERDataStore:
             "is_delayed": delay > 0
         }
 
+    def get_calendar_info(self, version_id: Optional[str] = None, context: str = "audit") -> List[Dict]:
+        """Returns structured calendar data from the loaded XER file."""
+        source = self.get_latest(context=context, version_id=version_id)
+        if not source:
+            return []
+
+        calendars_df = source['df'].get('calendar', source['df'].get('CALENDAR'))
+        project_df = source['df'].get('project', source['df'].get('PROJECT'))
+
+        # Get the default project calendar ID
+        default_cal_id = None
+        if project_df is not None and not project_df.empty:
+            default_cal_id = str(project_df.iloc[0].get('clndr_id', ''))
+
+        if calendars_df is None or calendars_df.empty:
+            return []
+
+        results = []
+        for _, row in calendars_df.iterrows():
+            cal_id = str(row.get('clndr_id', ''))
+            name = row.get('clndr_name', row.get('clndr_short_name', f'Calendar {cal_id}'))
+            hours_per_day = None
+            try:
+                hours_per_day = float(row.get('day_hr_cnt', 0)) or None
+            except (ValueError, TypeError):
+                pass
+
+            results.append({
+                "id": cal_id,
+                "name": name,
+                "hours_per_day": hours_per_day,
+                "is_project_default": (cal_id == default_cal_id),
+                "type": row.get('clndr_type', 'Unknown'),
+            })
+
+        return results
+
     def get_critical_path_details(self, limit: int = 20, context: str = "audit") -> List[Dict]:
         """Returns structured info on the most critical tasks"""
         source = self.get_latest(context=context)

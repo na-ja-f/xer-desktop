@@ -53,6 +53,7 @@ function ControllerAssistantMessage({ content }) {
             <Activity size={12} className="text-blue-500 animate-pulse" />
             <span className="text-[9px] font-black text-blue-700 uppercase tracking-widest">
               Showing {content.displayed_count || content.display_items?.length} of {content.total_count} activities
+              {content.stats?.total_project_activities ? ` (${((content.total_count / content.stats.total_project_activities) * 100).toFixed(1)}% of project)` : ''}
             </span>
           </div>
           <button

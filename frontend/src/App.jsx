@@ -356,10 +356,15 @@ function App() {
     const q = typeof submittedQuery === 'string' ? submittedQuery : query;
     if (!q || isTyping) return
 
+    const isGreeting = /^(hi|hello|hey|good morning|good afternoon|good evening|greetings)\b/i.test(q.trim());
+
     if (!auditBaselineLoaded) {
+      const reply = isGreeting 
+        ? "Hello! I am your XerAgent planning assistant. To get started, please upload a project XER file so we can analyze the schedule together."
+        : "I'd love to help you with that! Please upload a project XER file first so I can access the schedule data.";
       setMessages(prev => [...prev, 
         { role: 'user', content: q }, 
-        { role: 'assistant', content: "Please upload a project XER file to begin the analysis." }
+        { role: 'assistant', content: reply }
       ])
       setQuery('')
       return
@@ -398,10 +403,15 @@ function App() {
     const q = typeof submittedQuery === 'string' ? submittedQuery : controllerQuery;
     if (!q || isControllerTyping) return
 
+    const isGreeting = /^(hi|hello|hey|good morning|good afternoon|good evening|greetings)\b/i.test(q.trim());
+
     if (!controllerBaselineLoaded) {
+      const reply = isGreeting 
+        ? "Hello! I am your XerAgent planning assistant. To get started, please upload a project XER file so we can analyze the schedule together."
+        : "I'd love to help you with that! Please upload a project XER file first so I can access the schedule data.";
       setControllerMessages(prev => [...prev, 
         { role: 'user', content: q }, 
-        { role: 'assistant', content: "Please upload a project XER file to query the database." }
+        { role: 'assistant', content: reply }
       ])
       setControllerQuery('')
       return

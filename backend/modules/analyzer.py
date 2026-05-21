@@ -32,6 +32,7 @@ AVAILABLE TOOLS:
 14. get_resource_summary() - Project-wide resource counts.
 15. get_resource_assignments(activity_name: str) - Resource assignments. Use to find who is working on a specific activity.
 16. get_resource_load() - Resource workload distribution.
+17. get_calendar_info() - Show all calendars in the project: names, working hours, and which is the project default.
 
 ROUTING RULES:
 - If KNOWLEDGE_QUERY: Do NOT call any tool. Return tool: "direct_response".
@@ -68,11 +69,14 @@ GUIDELINES:
    3. **Positive Findings**: Highlight the passing DCMA checks to reassure the user.
    4. **Overall Assessment**: Conclude the forensic state of the schedule.
    Put the actionable, prioritized fixes into the JSON `recommendations` array so they render as strategic cards. When making recommendations, you MUST cite the specific metric value or threshold from the assessment (e.g., 'Reduce 30.98% high float to <5%'). Do NOT hallucinate metrics; derive everything strictly from `assessment_details` and `issues`.
-- SCOPE REFUSAL: You only answer construction scheduling or project control questions related to the loaded project (e.g., '{PROJECT_NAME}'). If the user asks about weather, news, sports, or general off-topic questions, you MUST refuse to answer. Use exactly this pattern for your summary: "I help with construction schedule questions for the '{PROJECT_NAME}' project. I don't answer weather, news, or general questions. Try asking about activities, variance, critical path, or trade scope status."
+- GREETINGS & CONVERSATION: If the user says "Hello", "Hi", "Good morning", or gives a standard greeting, you MUST reply warmly and professionally. Greet them back, state that you are their XerAgent planning assistant, and suggest a few specific things they can ask you about the schedule (e.g., critical path, delays, health score). Do NOT trigger the scope refusal. Do NOT claim that no data is loaded just because the data array is empty; a greeting simply doesn't require querying activities.
+- SCOPE REFUSAL: You only answer construction scheduling or project control questions related to the loaded project (e.g., '{PROJECT_NAME}'). If the user asks about weather, news, sports, or general off-topic questions (excluding standard greetings), you MUST refuse to answer. Use exactly this pattern for your summary: "I help with construction schedule questions for the '{PROJECT_NAME}' project. I don't answer weather, news, or general questions. Try asking about activities, variance, critical path, or trade scope status."
 - DUAL MODE: 
     - For KNOWLEDGE queries: Answer directly and thoroughly using your internal knowledge.
     - For DATA/HYBRID queries: Use the provided BACKEND DATA for numbers, but use your intelligence for the "Why" and "So What".
 - NOTE ON CRITICAL PATH: Any task with float <= 0 is considered critical. Do not assume tasks are missing or invalid if float is 0.
+- ACTIVITY COUNT CONTEXT: The backend payload includes `total_project_activities` (the full project scope) and `total_activities_found` (the result set). When discussing critical path, delayed activities, or any filtered list, ALWAYS frame the count against total_project_activities. Example: "861 of 4,869 total activities (17.7%) are on the critical path." Never say "all activities" unless total_activities_found equals total_project_activities.
+- RECOMMENDATIONS FORMAT: Each item in the `recommendations` array MUST be a plain string, never a JSON object or dict. Do NOT return {"action":"...","reason":"..."}. Just write: "Monitor X — because Y."
 
 Return ONLY valid JSON:
 {"summary":"...","metrics":{},"insights":[],"recommendations":[],"template_type":"knowledge|list|metric|clarify"}"""
@@ -296,6 +300,8 @@ class XERAnalyzer:
             )
         elif tool == "get_resource_load":
             result = self.resource_engine.get_resource_load(context=ctx)
+        elif tool == "get_calendar_info":
+            result = self.get_calendar_info(context=ctx, version_id=selected_version)
         else:
             result = {"success": False, "clarify": True, "total_count": 0, "data": []}
             
@@ -349,10 +355,14 @@ class XERAnalyzer:
             optim_tool_result["displayed_count"] = total_count
             optim_tool_result["all_items"] = full_data
 
+        stats = tool_result.get("stats", {})
+        total_project_activities = stats.get("total_project_activities", None)
+
         payload_to_llm = {
             "total_activities_found": total_count,
+            "total_project_activities": total_project_activities,
             "preview_items_provided": len(optim_tool_result["data"]),
-            "stats": tool_result.get("stats", {}),
+            "stats": stats,
             "data": optim_tool_result["data"]
         }
 
@@ -430,7 +440,21 @@ class XERAnalyzer:
         result["metrics"] = {k: (str(v) if isinstance(v, (dict, list)) else v)
                              for k, v in m.items() if v is not None}
         result["insights"] = [str(i) for i in result.get("insights", []) if i]
-        result["recommendations"] = [str(r) for r in result.get("recommendations", []) if r]
+        # Flatten dict-style recommendations {"action": ..., "reason": ...} into readable strings
+        sanitized_recs = []
+        for r in result.get("recommendations", []):
+            if isinstance(r, dict):
+                action = r.get("action", "")
+                reason = r.get("reason", "")
+                if action and reason:
+                    sanitized_recs.append(f"{action} — {reason}")
+                elif action:
+                    sanitized_recs.append(action)
+                else:
+                    sanitized_recs.append(str(r))
+            elif r:
+                sanitized_recs.append(str(r))
+        result["recommendations"] = sanitized_recs
         return result
 
     @staticmethod
@@ -561,7 +585,7 @@ class XERAnalyzer:
                 "error": resp["message"], 
                 "clarify": True, 
                 "suggestions": [m.get("task_name", m.get("task_code", "")) for m in resolution["matches"][:3]],
-                "disambiguation_candidates": resolution["matches"][:5] if resp["status"] == "disambiguate" else None,
+                "disambiguation_candidates": resolution["matches"][:5] if resp["status"] in ["disambiguate", "narrow"] else None,
                 "original_query": term
             }
             
@@ -646,7 +670,8 @@ class XERAnalyzer:
         return {"success": True, "total_count": len(full_data), "displayed_count": len(preview_data),
                 "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
                 "stats": {"max_delay_days": max(delays) if delays else 0,
-                          "avg_delay_days": round(sum(delays)/len(delays), 1) if delays else 0}}
+                          "avg_delay_days": round(sum(delays)/len(delays), 1) if delays else 0,
+                          "total_project_activities": len(acts)}}
 
     def get_critical_path(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
         from .scheduler_metrics import SchedulerMetrics
@@ -675,7 +700,8 @@ class XERAnalyzer:
         return {"success": True, "total_count": len(full_data), "displayed_count": len(preview_data),
                 "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
                 "stats": {"total_critical": len(full_data),
-                          "neg_float_count": sum(1 for a in critical.values() if a.get("float_hrs",0) < 0)}}
+                          "neg_float_count": sum(1 for a in critical.values() if a.get("float_hrs",0) < 0),
+                          "total_project_activities": len(acts)}}
 
     def get_negative_float_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
         source = self.data_store.get_latest(context=context, version_id=version_id)
@@ -836,6 +862,28 @@ class XERAnalyzer:
             "all_items": [summary_data],
             "stats": summary_data,
             "template_type": "health"
+        }
+
+    def get_calendar_info(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        """Returns structured calendar information for the loaded project."""
+        calendars = self.data_store.get_calendar_info(version_id=version_id, context=context)
+        if not calendars:
+            return {"success": False, "error": "No calendar data found in the loaded schedule.", "clarify": True, "total_count": 0, "data": [], "display_items": []}
+        
+        return {
+            "success": True,
+            "total_count": len(calendars),
+            "displayed_count": len(calendars),
+            "is_truncated": False,
+            "data": calendars,
+            "display_items": calendars,
+            "all_items": calendars,
+            "stats": {
+                "total_calendars": len(calendars),
+                "project_default": next((c["name"] for c in calendars if c.get("is_project_default")), "Not identified"),
+                "hours_per_day": next((c["hours_per_day"] for c in calendars if c.get("is_project_default")), None),
+            },
+            "template_type": "list"
         }
 
     def check_integrity(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
