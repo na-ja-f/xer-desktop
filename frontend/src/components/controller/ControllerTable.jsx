@@ -127,6 +127,27 @@ const TaskRow = React.memo(({ task, formatP6Date }) => {
                 )}
              </div>
           </div>
+
+          {/* Activity Codes */}
+          {analysis.activity_codes && Object.keys(analysis.activity_codes).length > 0 && (
+            <div className="mt-2 pt-2 border-t border-gray-200">
+              <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-200 pb-1 mb-2">Activity Codes</h4>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {Object.entries(analysis.activity_codes).map(([type, valObj]) => {
+                  const val = typeof valObj === 'object' && valObj !== null ? valObj.value : valObj;
+                  const scope = typeof valObj === 'object' && valObj !== null ? valObj.scope : '';
+                  return (
+                  <div key={type} className="bg-white border border-gray-200 rounded-lg px-3 py-2 shadow-sm">
+                    <div className="flex justify-between items-center mb-0.5">
+                      <div className="text-[8px] font-bold text-gray-400 uppercase tracking-wider truncate" title={type}>{type}</div>
+                      {scope && <span className="text-[7px] font-bold text-gray-500 bg-gray-100 px-1 py-0.5 rounded">{scope}</span>}
+                    </div>
+                    <div className="text-[10px] font-bold text-blue-700 truncate" title={val}>{val}</div>
+                  </div>
+                )})}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

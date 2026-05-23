@@ -1,7 +1,7 @@
 import os, json, logging, re
 import difflib
 from openai import OpenAI
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 from .data_store import XERDataStore
 
 logger = logging.getLogger(__name__)
@@ -17,8 +17,8 @@ CLASSIFY the user query into EXACTLY one type:
 
 AVAILABLE TOOLS:
 1. get_activity_details(name: str) - Find specific activities/tasks.
-2. get_delayed_activities(limit: int) - List late or overdue tasks.
-3. get_critical_path(limit: int) - Critical path queries.
+2. get_delayed_activities(limit: int, code_filter: str) - List late or overdue tasks. Pass a code value to filter (e.g. "Construction").
+3. get_critical_path(limit: int, code_filter: str) - Critical path queries. Pass a code value to filter.
 4. get_negative_float_activities(limit: int) - Negative float tasks.
 5. get_positive_float_activities(limit: int) - Positive float (slack) tasks.
 6. analyze_activity_delay(activity_name: str) - "Why is X delayed?", "Impact of X".
@@ -33,6 +33,19 @@ AVAILABLE TOOLS:
 15. get_resource_assignments(activity_name: str) - Resource assignments. Use to find who is working on a specific activity.
 16. get_resource_load() - Resource workload distribution.
 17. get_calendar_info() - Show all calendars in the project: names, working hours, and which is the project default.
+18. get_activity_code_types() - List all Activity Code Types, their scopes, and values defined in the project.
+19. get_activity_code_types_by_scope(scope: str) - List activity code types filtered by a specific scope (valid scopes: 'Project', 'Global', 'EPS'). Use when user asks "Show project activity codes" or "Show global activity codes".
+20. get_activity_code_values(code_type: str) - List all specific values for a given Activity Code Type (e.g. "What utilities exist?").
+21. get_activities_by_code(code_type: str, code_value: str, rollup: bool, exact_match: bool) - Filter activities by a specific Activity Code. Use when user asks for activities of a specific type/category/level/utility/area/trade. Set rollup=True if user asks for activities "under" or "within" a parent area (to include descendants). Set exact_match=True if user asks for activities "directly assigned" to a specific area.
+
+ACTIVITY CODE ROUTING RULES:
+- When a user asks about "Construction activities", "Sewer activities", "Sector 1A", or any category that matches a detected Activity Code Type or Value, route to get_activities_by_code.
+- When a user asks "which level/type/area/utility does activity X belong to?", route to get_activity_details — the response will include Activity Codes.
+- When a user asks "show me all code types" or "what activity codes are in this project?", route to get_activity_code_types.
+- When a user asks for codes by scope (e.g., "project activity codes", "global codes"), route to get_activity_code_types_by_scope.
+- When a user asks "what values exist for X" or "list all areas/utilities/levels", route to get_activity_code_values.
+- When a user asks for delayed/critical activities filtered by a code value (e.g., "delayed Construction activities"), route to get_delayed_activities or get_critical_path with the code_filter argument.
+{DETECTED_CODE_TYPES}
 
 ROUTING RULES:
 - If KNOWLEDGE_QUERY: Do NOT call any tool. Return tool: "direct_response".
@@ -69,13 +82,19 @@ GUIDELINES:
    3. **Positive Findings**: Highlight the passing DCMA checks to reassure the user.
    4. **Overall Assessment**: Conclude the forensic state of the schedule.
    Put the actionable, prioritized fixes into the JSON `recommendations` array so they render as strategic cards. When making recommendations, you MUST cite the specific metric value or threshold from the assessment (e.g., 'Reduce 30.98% high float to <5%'). Do NOT hallucinate metrics; derive everything strictly from `assessment_details` and `issues`.
+- ACTIVITY CODES: When explaining activity code types (from get_activity_code_types), you MUST explicitly list and group the counts by Scope in your summary using markdown. Example format: "**Project Activity Codes (4)** - used for... \n\n**Global Activity Codes (2)** - used for...". Do NOT just write a single flat paragraph.
+- ACTIVITY CODE HIERARCHIES: When explaining code values (from get_activity_code_values) and hierarchy data (children/parents) is present, you MUST present the values as a tree using markdown characters (├ and └) instead of a flat list. Do not flatten the hierarchy. Example:
+  PACKAGE 1A
+  ├ Direct Assignments: 87
+  ├ SECTOR 1A
+  └ SECTOR 1B
 - GREETINGS & CONVERSATION: If the user says "Hello", "Hi", "Good morning", or gives a standard greeting, you MUST reply warmly and professionally. Greet them back, state that you are their XerAgent planning assistant, and suggest a few specific things they can ask you about the schedule (e.g., critical path, delays, health score). Do NOT trigger the scope refusal. Do NOT claim that no data is loaded just because the data array is empty; a greeting simply doesn't require querying activities.
 - SCOPE REFUSAL: You only answer construction scheduling or project control questions related to the loaded project (e.g., '{PROJECT_NAME}'). If the user asks about weather, news, sports, or general off-topic questions (excluding standard greetings), you MUST refuse to answer. Use exactly this pattern for your summary: "I help with construction schedule questions for the '{PROJECT_NAME}' project. I don't answer weather, news, or general questions. Try asking about activities, variance, critical path, or trade scope status."
 - DUAL MODE: 
     - For KNOWLEDGE queries: Answer directly and thoroughly using your internal knowledge.
     - For DATA/HYBRID queries: Use the provided BACKEND DATA for numbers, but use your intelligence for the "Why" and "So What".
 - NOTE ON CRITICAL PATH: Any task with float <= 0 is considered critical. Do not assume tasks are missing or invalid if float is 0.
-- ACTIVITY COUNT CONTEXT: The backend payload includes `total_project_activities` (the full project scope) and `total_activities_found` (the result set). When discussing critical path, delayed activities, or any filtered list, ALWAYS frame the count against total_project_activities. Example: "861 of 4,869 total activities (17.7%) are on the critical path." Never say "all activities" unless total_activities_found equals total_project_activities.
+- ACTIVITY COUNT CONTEXT: The backend payload includes `total_project_activities` (the full project scope). If a `filtered_subset_total` is provided (e.g., when a user filters by an Activity Code), you MUST frame your response around both totals! Example: "There are 2,861 Construction activities delayed out of 2,867 Construction activities (99.8%), while the project overall has 4,869 total activities." ALWAYS calculate and state the percentage in your summary. Never say "all activities" unless the delayed/critical count equals the total project activities.
 - RECOMMENDATIONS FORMAT: Each item in the `recommendations` array MUST be a plain string, never a JSON object or dict. Do NOT return {"action":"...","reason":"..."}. Just write: "Monitor X — because Y."
 
 Return ONLY valid JSON:
@@ -122,19 +141,40 @@ class XERAnalyzer:
     # ── Session ───────────────────────────────────────────────────────────────
     def _get_session(self, sid: str) -> Dict:
         if sid not in self.sessions:
-            self.sessions[sid] = {"history": [], "last_search_term": None, "last_result_ids": []}
+            self.sessions[sid] = {"history": [], "last_search_term": None, "last_result_ids": [], "selected_activity": None}
         return self.sessions[sid]
 
-    def _update_session(self, s: Dict, query: str, tool_call: Dict, resp: Dict):
-        data = tool_call.get("data", [])
-        if tool_call.get("tool") == "get_activity_details" and tool_call.get("arguments", {}).get("name"):
-            s["last_search_term"] = tool_call["arguments"]["name"]
-            s["last_result_ids"] = [d.get("id") for d in data if isinstance(d, dict)]
+    def _update_session(self, s: Dict, query: str, tool_call: Dict, resp: Dict, tool_result: Dict = None):
+        # Extract data from the actual tool_result to ensure we have the resolved data
+        if tool_result:
+            data = tool_result.get("data", [])
+        else:
+            data = resp.get("data", [])
+            
+        tool = tool_call.get("tool")
+        
+        if tool == "get_activity_details":
+            if tool_call.get("arguments", {}).get("name"):
+                s["last_search_term"] = tool_call["arguments"]["name"]
+            elif tool_call.get("arguments", {}).get("activity_name"):
+                s["last_search_term"] = tool_call["arguments"]["activity_name"]
+            
+            # If we successfully resolved exactly ONE activity, persist it as the selected entity!
+            if len(data) == 1 and isinstance(data[0], dict):
+                act = data[0]
+                s["selected_activity"] = {
+                    "selected_activity_id": act.get("id"),
+                    "selected_activity_code": act.get("code"),
+                    "selected_activity_name": act.get("name")
+                }
+                logger.info(f"Selected activity stored: {act.get('code')}")
         elif data and isinstance(data[0], dict) and "id" in data[0]:
+            # For other tools returning lists of activities, just track the search term and clear strict selection
             s["last_search_term"] = data[0].get("name")
             s["last_result_ids"] = [d.get("id") for d in data if isinstance(d, dict)]
+            s["selected_activity"] = None
             
-        s["history"].append({"user": query[:120], "tool": tool_call.get("tool"),
+        s["history"].append({"user": query[:120], "tool": tool,
                               "assistant": resp.get("summary", "")[:150]})
         if len(s["history"]) > 5: s["history"].pop(0)
 
@@ -145,11 +185,35 @@ class XERAnalyzer:
         
         # Build context hint for follow-up queries
         context_hint = ""
-        if session.get("last_search_term"):
-            context_hint = f"\nLast Activity Discussed: \"{session['last_search_term']}\""
-            context_hint += "\nIMPORTANT: If the user says 'it', 'this', 'that activity', they are referring to the above activity. " \
-                           "Resolve the pronoun and include the activity name in the tool arguments."
+        selected_act = session.get("selected_activity")
+        if selected_act:
+            logger.info(f"[{session.get('sid', '???')}] Pronoun context available: {selected_act.get('selected_activity_code')}")
+            context_hint = f"\nLast Selected Activity: {selected_act['selected_activity_code']} ({selected_act['selected_activity_name']})"
+            context_hint += "\nIMPORTANT: If the user uses pronouns ('it', 'this activity', 'that activity', 'same activity', 'selected activity', 'above activity'), they are referring to the Last Selected Activity. " \
+                           "Resolve the pronoun and use the selected activity code as the argument."
+        elif session.get("last_search_term"):
+            context_hint = f"\nLast Topic Discussed: \"{session['last_search_term']}\""
         
+        # Inject detected Activity Code Types into the router context
+        code_types_hint = ""
+        ctx_str_for_codes = (context or {}).get("current_view", "audit")
+        try:
+            code_types = self.data_store.get_activity_code_types(context=ctx_str_for_codes)
+            if code_types:
+                types_list = []
+                for t, info in code_types.items():
+                    vals = info["values"]
+                    preview = ', '.join(vals[:5])
+                    if len(vals) > 5:
+                        preview += f', ... ({len(vals)} total)'
+                    types_list.append(f"  - {t}: [{preview}]")
+                code_types_hint = "\n\nDetected Activity Code Types in this project:\n" + "\n".join(types_list)
+                code_types_hint += "\nIMPORTANT: If the user's query mentions ANY of these code type names or code values, route to get_activities_by_code or include code_filter in arguments."
+        except Exception:
+            pass
+
+        router_prompt = ROUTER_PROMPT.replace("{DETECTED_CODE_TYPES}", code_types_hint)
+
         user_msg = (
             f"Query: \"{query}\"\n\n"
             f"UI State: {ui_state}\n\n"
@@ -161,7 +225,7 @@ class XERAnalyzer:
             # First, classify query type and tool using direct completion (faster for intent)
             res = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "system", "content": ROUTER_PROMPT},
+                messages=[{"role": "system", "content": router_prompt},
                           {"role": "user", "content": user_msg}],
                 temperature=0,
                 response_format={"type": "json_object"} if self.provider == "openai" else None
@@ -230,9 +294,11 @@ class XERAnalyzer:
             if not name and session.get("last_search_term"): name = session["last_search_term"]
             result = self.get_activity_details(name, context=ctx, version_id=selected_version)
         elif tool == "get_delayed_activities":
-            result = self.get_delayed_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version)
+            code_filter = args.get("code_filter")
+            result = self.get_delayed_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version, code_filter=code_filter)
         elif tool == "get_critical_activities" or tool == "get_critical_path":
-            result = self.get_critical_path(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version)
+            code_filter = args.get("code_filter")
+            result = self.get_critical_path(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version, code_filter=code_filter)
         elif tool == "get_negative_float_activities":
             result = self.get_negative_float_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version)
         elif tool == "get_positive_float_activities":
@@ -302,6 +368,24 @@ class XERAnalyzer:
             result = self.resource_engine.get_resource_load(context=ctx)
         elif tool == "get_calendar_info":
             result = self.get_calendar_info(context=ctx, version_id=selected_version)
+        elif tool == "get_activity_code_types":
+            result = self.get_activity_code_types_tool(context=ctx, version_id=selected_version)
+        elif tool == "get_activity_code_types_by_scope":
+            result = self.get_activity_code_types_tool(context=ctx, version_id=selected_version, scope=args.get("scope"))
+        elif tool == "get_activity_code_values":
+            result = self.get_activity_code_values(
+                code_type=args.get("code_type", ""),
+                context=ctx, version_id=selected_version
+            )
+        elif tool == "get_activities_by_code":
+            result = self.get_activities_by_code(
+                code_type=args.get("code_type", ""),
+                code_value=args.get("code_value", ""),
+                rollup=args.get("rollup", False),
+                exact_match=args.get("exact_match", False),
+                limit=args.get("limit", 100),
+                context=ctx, version_id=selected_version
+            )
         else:
             result = {"success": False, "clarify": True, "total_count": 0, "data": []}
             
@@ -525,7 +609,7 @@ class XERAnalyzer:
                     }
                     tool_result = self._execute_tool(route, context, session)
                     response = self._explain(pending["original_query"] + f" ({match.get('task_name')})", route, tool_result, context, session)
-                    self._update_session(session, query, route, response)
+                    self._update_session(session, query, route, response, tool_result=tool_result)
                     return response
                 else:
                     session.pop("pending_activity_selection", None)
@@ -548,7 +632,7 @@ class XERAnalyzer:
             response = self._explain(query, route, tool_result, context, session)
             
             # 4. History update
-            self._update_session(session, query, route, response)
+            self._update_session(session, query, route, response, tool_result=tool_result)
             return response
         except Exception as e:
             logger.error(f"Analysis error: {e}", exc_info=True)
@@ -595,6 +679,7 @@ class XERAnalyzer:
 
         hpd = source.get("hours_per_day", 8)
         analysis = self.data_store.get_deterministic_analysis(version_id=source['id'], context=context).get("activityAnalysis", {})
+        code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context)
         
         full_data = []
         for r in combined_list:
@@ -609,6 +694,13 @@ class XERAnalyzer:
             }
             display_status = status_map.get(status_enum, "Not Started")
 
+            codes_payload = {}
+            for k, v in act_analysis.get("activity_codes", {}).items():
+                codes_payload[k] = {
+                    "value": v,
+                    "scope": code_types.get(k, {}).get("scope", "Global")
+                }
+
             full_data.append({
                 "id": tid, "code": r["task_code"], "name": r["task_name"],
                 "status": display_status,
@@ -617,7 +709,8 @@ class XERAnalyzer:
                 "float_days": round(float_hrs / hpd, 1),
                 "is_critical": float_hrs <= 0,
                 "delay_days": act_analysis.get("delay_days"),
-                "wbs_path": r.get("wbs_path", "")
+                "wbs_path": r.get("wbs_path", ""),
+                "activity_codes": codes_payload
             })
             
         data_ref = self.data_store.store_result(full_data)
@@ -642,7 +735,85 @@ class XERAnalyzer:
         source["wbs_path_map"] = wbs_map
         return wbs_map
 
-    def get_delayed_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
+    def _filter_by_code(self, acts: Dict, code_filter: Union[Dict, str, None], code_types: Dict = None) -> Dict:
+        """Filter activities by Activity Code type/value.
+        code_filter: {"code_type": "AMR-P1- LEVELS", "code_value": "AMI-CONSTRUCTION", "rollup": True, "exact_match": True}
+        """
+        if not code_filter:
+            return acts
+        
+        if isinstance(code_filter, str):
+            code_type = ""
+            code_value = code_filter.strip()
+            rollup = False
+            exact_match = False
+        else:
+            code_type = (code_filter.get("code_type") or "").strip()
+            code_value = (code_filter.get("code_value") or "").strip()
+            rollup = code_filter.get("rollup", False)
+            exact_match = code_filter.get("exact_match", False)
+            
+        if not code_type and not code_value:
+            return acts
+
+        def norm(s): return s.strip().lower().replace(" ", "")
+
+        # If rollup is True, collect all target values (including descendants)
+        target_values = [code_value.lower()] if code_value else []
+        if rollup and code_value and code_types:
+            for type_info in code_types.values():
+                hierarchy = type_info.get("hierarchy", {})
+                for k, v in hierarchy.items():
+                    if norm(code_value) == norm(k):
+                        # Found the node, add all its descendants
+                        def add_descendants(node_val):
+                            if node_val in hierarchy:
+                                for child in hierarchy[node_val].get("children_values", []):
+                                    target_values.append(child.lower())
+                                    add_descendants(child)
+                        add_descendants(k)
+
+        filtered = {}
+        for tid, a in acts.items():
+            codes = a.get("activity_codes", {})
+            if not codes:
+                continue
+                
+            matched = False
+            
+            if code_type and code_value:
+                for t, v in codes.items():
+                    if norm(code_type) in norm(t) or norm(t) in norm(code_type):
+                        if exact_match:
+                            if any(v.lower() == tv for tv in target_values):
+                                matched = True
+                                break
+                        else:
+                            if any(tv in v.lower() for tv in target_values):
+                                matched = True
+                                break
+            elif code_value:
+                for v in codes.values():
+                    if exact_match:
+                        if any(v.lower() == tv for tv in target_values):
+                            matched = True
+                            break
+                    else:
+                        if any(tv in v.lower() for tv in target_values):
+                            matched = True
+                            break
+            elif code_type:
+                for t in codes.keys():
+                    if norm(code_type) in norm(t) or norm(t) in norm(code_type):
+                        matched = True
+                        break
+                        
+            if matched:
+                filtered[tid] = a
+                
+        return filtered
+
+    def get_delayed_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None, code_filter: Optional[Dict] = None) -> Dict:
         source = self.data_store.get_latest(context=context, version_id=version_id)
         if source and source.get("type") == "baseline":
             return {"success": False, "error": "Cannot compute delays or list delayed activities because only the baseline schedule is loaded. Delay analysis requires actual progress updates."}
@@ -651,8 +822,9 @@ class XERAnalyzer:
         analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         acts = analysis.get("activityAnalysis", {})
         acts = self._filter_wbs(acts, wbs_filter, source)
+        acts = self._filter_by_code(acts, code_filter)
         
-        delayed = {tid: a for tid, a in acts.items() if a.get("delay_days", 0) > 0 and a.get("status_enum") != "COMPLETED"}
+        delayed = {tid: a for tid, a in acts.items() if (a.get("delay_days") or 0) > 0 and a.get("status_enum") != "COMPLETED"}
         sorted_acts = sorted(delayed.items(), key=lambda x: x[1].get("delay_days", 0), reverse=True)
         hpd = source.get("hours_per_day", 8) if source else 8
         
@@ -661,25 +833,35 @@ class XERAnalyzer:
                       "wbs_path": wbs_map.get(str(a.get("wbs_id")), str(a.get("wbs_id", ""))),
                       "delay_days": a.get("delay_days", 0),
                       "float_days": round(a.get("float_hrs", 0) / hpd, 1),
-                      "status": a.get("status_enum","")} for tid, a in sorted_acts]
+                      "status": a.get("status_enum",""),
+                      "activity_codes": a.get("activity_codes", {})} for tid, a in sorted_acts]
         
         data_ref = self.data_store.store_result(full_data)
         preview_data = full_data[:limit]
         delays = [a.get("delay_days", 0) for a in delayed.values()]
         
+        filter_label = ""
+        if isinstance(code_filter, str):
+            filter_label = f" (filtered by {code_filter})"
+        elif isinstance(code_filter, dict):
+            filter_label = f" (filtered by {code_filter.get('code_type', '')} = {code_filter.get('code_value', '')})"
+        
         return {"success": True, "total_count": len(full_data), "displayed_count": len(preview_data),
                 "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
                 "stats": {"max_delay_days": max(delays) if delays else 0,
                           "avg_delay_days": round(sum(delays)/len(delays), 1) if delays else 0,
-                          "total_project_activities": len(acts)}}
+                          "total_project_activities": len(analysis.get("activityAnalysis", {})),
+                          "filtered_subset_total": len(acts),
+                          "filter_applied": filter_label}}
 
-    def get_critical_path(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
+    def get_critical_path(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None, code_filter: Optional[Dict] = None) -> Dict:
         from .scheduler_metrics import SchedulerMetrics
         source = self.data_store.get_latest(context=context, version_id=version_id)
         vid = source['id'] if source else None
         analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
         acts = analysis.get("activityAnalysis", {})
         acts = self._filter_wbs(acts, wbs_filter, source)
+        acts = self._filter_by_code(acts, code_filter)
         
         graph = source.get("dependency_graph", {}) if source else {}
         metrics = SchedulerMetrics.compute_core_metrics(acts, graph)
@@ -692,16 +874,257 @@ class XERAnalyzer:
         full_data = [{"id": tid, "code": a.get("task_code",""), "name": a.get("task_name",""),
                       "wbs_path": wbs_map.get(str(a.get("wbs_id")), str(a.get("wbs_id", ""))),
                       "float_days": round(a.get("float_hrs", 0) / hpd, 1),
-                      "delay_days": a.get("delay_days", 0)} for tid, a in sorted_acts]
+                      "delay_days": a.get("delay_days", 0),
+                      "activity_codes": a.get("activity_codes", {})} for tid, a in sorted_acts]
         
         data_ref = self.data_store.store_result(full_data)
         preview_data = full_data[:limit]
         
+        filter_label = ""
+        if isinstance(code_filter, str):
+            filter_label = f" (filtered by {code_filter})"
+        elif isinstance(code_filter, dict):
+            filter_label = f" (filtered by {code_filter.get('code_type', '')} = {code_filter.get('code_value', '')})"
+            
         return {"success": True, "total_count": len(full_data), "displayed_count": len(preview_data),
                 "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
                 "stats": {"total_critical": len(full_data),
                           "neg_float_count": sum(1 for a in critical.values() if a.get("float_hrs",0) < 0),
-                          "total_project_activities": len(acts)}}
+                          "total_project_activities": len(analysis.get("activityAnalysis", {})),
+                          "filtered_subset_total": len(acts),
+                          "filter_applied": filter_label}}
+
+    def get_activity_code_types_tool(self, context: str = "audit", version_id: Optional[str] = None, scope: Optional[str] = None) -> Dict:
+        """AI tool wrapper: Returns all Activity Code Types and their available values and assignment stats."""
+        code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context, scope=scope)
+        if not code_types:
+            return {"success": False, "error": f"No Activity Codes found in the loaded schedule{(' for scope ' + scope) if scope else ''}.", "total_count": 0, "data": [], "display_items": []}
+        
+        # Get actual assignments from activity analysis to compute assignment counts
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
+        acts = analysis.get("activityAnalysis", {})
+        
+        type_assignments = {t: 0 for t in code_types.keys()}
+        total_activities_with_codes = set()
+        
+        for tid, a in acts.items():
+            codes = a.get("activity_codes", {})
+            if codes:
+                for t in codes.keys():
+                    if t in type_assignments:
+                        type_assignments[t] += 1
+                        total_activities_with_codes.add(tid)
+        
+        data = [
+            {
+                "code_type": t, 
+                "scope": info["scope"],
+                "values": info["values"], 
+                "distinct_value_count": len(info["values"]),
+                "assigned_activities_count": type_assignments.get(t, 0)
+            } 
+            for t, info in code_types.items()
+        ]
+        
+        # Sort data by scope (Project -> Global -> EPS) then by name
+        scope_order = {"Project": 0, "Global": 1, "EPS": 2}
+        data.sort(key=lambda x: (scope_order.get(x["scope"], 99), x["code_type"]))
+        
+        scope_counts = {
+            "Project": sum(1 for d in data if d["scope"] == "Project"),
+            "Global": sum(1 for d in data if d["scope"] == "Global"),
+            "EPS": sum(1 for d in data if d["scope"] == "EPS")
+        }
+        
+        return {
+            "success": True,
+            "total_count": len(data),
+            "displayed_count": len(data),
+            "is_truncated": False,
+            "data": data,
+            "display_items": data,
+            "all_items": data,
+            "stats": {
+                "total_code_types": len(data), 
+                "scope_counts": scope_counts,
+                "total_distinct_values": sum(len(info["values"]) for info in code_types.values()),
+                "total_activities_with_any_code": len(total_activities_with_codes),
+                "total_project_activities": len(acts)
+            },
+            "template_type": "list"
+        }
+
+    def get_activity_code_values(self, code_type: str, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        """Returns all specific values for a given Activity Code Type."""
+        code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context)
+        if not code_types:
+            return {"success": False, "error": "No Activity Codes found in the loaded schedule."}
+            
+        matched_type = None
+        
+        # Helper to normalize strings for comparison
+        def norm(s): return s.strip().lower().replace(" ", "")
+        
+        # 1. Try exact normalized match first
+        for t in code_types.keys():
+            if norm(t) == norm(code_type):
+                matched_type = t
+                break
+                
+        # 2. Try substring match if exact fails
+        if not matched_type:
+            for t in code_types.keys():
+                if norm(code_type) in norm(t) or norm(t) in norm(code_type):
+                    matched_type = t
+                    break
+                
+        if not matched_type:
+            return {
+                "success": False, 
+                "error": f"Activity Code Type '{code_type}' not found.",
+                "available_types": list(code_types.keys())
+            }
+            
+        info = code_types[matched_type]
+        values = info["values"]
+        scope = info["scope"]
+        hierarchy = info.get("hierarchy", {})
+        
+        data = []
+        for v in values:
+            item = {"value": v, "scope": scope}
+            if v in hierarchy:
+                node = hierarchy[v]
+                item["parent_actv_code_id"] = node.get("parent_actv_code_id")
+                item["parent_name"] = node.get("parent_value")
+                item["children"] = node.get("children_values", [])
+                item["hierarchy_path"] = node.get("hierarchy_path", v)
+            data.append(item)
+        
+        return {
+            "success": True,
+            "total_count": len(values),
+            "displayed_count": len(values),
+            "is_truncated": False,
+            "data": data,
+            "display_items": data,
+            "all_items": data,
+            "stats": {"code_type": matched_type, "scope": scope, "total_values": len(values)},
+            "template_type": "list"
+        }
+
+    def get_activities_by_code(self, code_type: str = "", code_value: str = "", rollup: bool = False, exact_match: bool = False, limit: int = 100, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        """Returns activities filtered by Activity Code type and/or value.
+        When no match is found, returns available code values for the requested type
+        so the AI can show the user what IS available — no fuzzy guessing.
+        """
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        if not source:
+            return {"success": False, "error": "No schedule data loaded."}
+        
+        vid = source['id']
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
+        acts = analysis.get("activityAnalysis", {})
+        
+        all_code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context)
+        
+        code_filter = {"code_type": code_type, "code_value": code_value, "rollup": rollup, "exact_match": exact_match}
+        filtered = self._filter_by_code(acts, code_filter, code_types=all_code_types)
+        
+        if not filtered:
+            # Zero match — provide available values so the AI can tell the user what exists
+            
+            available_values = []
+            matched_type = None
+            
+            if code_type:
+                # Exact or case-insensitive match for the type name
+                for t, vals in all_code_types.items():
+                    if t.strip().lower() == code_type.strip().lower():
+                        matched_type = t
+                        available_values = vals
+                        break
+            
+            if not matched_type and code_value:
+                # The user specified a value but no matching type — search all types for similar values
+                for t, vals in all_code_types.items():
+                    lower_vals = [v.lower() for v in vals]
+                    if code_value.strip().lower() in lower_vals:
+                        matched_type = t
+                        available_values = vals
+                        break
+            
+            error_msg = f"No activities found matching '{code_value}'"
+            if code_type:
+                error_msg += f" in code type '{code_type}'"
+            error_msg += "."
+            
+            if matched_type and available_values:
+                error_msg += f"\n\nAvailable values for '{matched_type}':\n"
+                for v in available_values:
+                    error_msg += f"  - {v}\n"
+            elif all_code_types:
+                error_msg += "\n\nAvailable Activity Code Types in this project:\n"
+                for t, info in all_code_types.items():
+                    vals = info["values"]
+                    preview = ', '.join(vals[:5])
+                    if len(vals) > 5:
+                        preview += f', ... ({len(vals)} total)'
+                    error_msg += f"  - {t}: [{preview}]\n"
+            
+            return {
+                "success": True, "total_count": 0, "displayed_count": 0,
+                "data": [], "display_items": [], "all_items": [],
+                "stats": {
+                    "filter": f"{code_type} = {code_value}",
+                    "total_project_activities": len(acts),
+                    "no_match_reason": error_msg,
+                    "available_values": available_values if matched_type else [],
+                    "available_types": list(all_code_types.keys()) if all_code_types else []
+                },
+                "template_type": "list"
+            }
+        
+        hpd = source.get("hours_per_day", 8)
+        wbs_map = self._get_wbs_map(source)
+        
+        sorted_acts = sorted(filtered.items(), key=lambda x: x[1].get("task_code", ""))
+        full_data = [{
+            "id": tid, "code": a.get("task_code", ""), "name": a.get("task_name", ""),
+            "status": a.get("status_enum", ""),
+            "float_days": round(a.get("float_hrs", 0) / hpd, 1),
+            "delay_days": a.get("delay_days", 0),
+            "is_critical": a.get("is_critical_p6", False),
+            "wbs_path": wbs_map.get(str(a.get("wbs_id")), ""),
+            "activity_codes": a.get("activity_codes", {})
+        } for tid, a in sorted_acts]
+        
+        data_ref = self.data_store.store_result(full_data)
+        preview_data = full_data[:limit]
+        
+        # Summary stats for the filtered set
+        delayed_count = sum(1 for a in filtered.values() if (a.get("delay_days") or 0) > 0 and a.get("status_enum") != "COMPLETED")
+        critical_count = sum(1 for a in filtered.values() if a.get("is_critical_p6", False))
+        completed_count = sum(1 for a in filtered.values() if a.get("status_enum") == "COMPLETED")
+        in_progress_count = sum(1 for a in filtered.values() if a.get("status_enum") == "IN_PROGRESS")
+        
+        return {
+            "success": True, "total_count": len(full_data), "displayed_count": len(preview_data),
+            "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
+            "stats": {
+                "filter": f"{code_type} = {code_value}",
+                "total_matched": len(full_data),
+                "total_project_activities": len(acts),
+                "delayed_count": delayed_count,
+                "critical_count": critical_count,
+                "completed_count": completed_count,
+                "in_progress_count": in_progress_count
+            },
+            "template_type": "list"
+        }
+
 
     def get_negative_float_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
         source = self.data_store.get_latest(context=context, version_id=version_id)
