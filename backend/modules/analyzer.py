@@ -6,6 +6,31 @@ from .data_store import XERDataStore
 
 logger = logging.getLogger(__name__)
 
+# ── WBS Branch Status Thresholds ──────────────────────────────────────────────
+# IMPORTANT: These are PLACEHOLDER values — they are not planner-approved or
+# based on any industry standard (DCMA, PMI, etc.). They were chosen as
+# reasonable defaults for initial development only.
+#
+# A planner or project controls lead should review and adjust these before
+# using this tool for any real project reporting or decision-making.
+#
+# All values are fractional percentages of non-completed activities in a branch.
+# e.g. 0.30 = 30% of activities in the branch.
+WBS_STATUS_THRESHOLDS: Dict[str, Any] = {
+    # A branch is tagged "Critical" if more than this fraction of its
+    # non-completed activities sit on the critical path (float <= 0).
+    "critical_pct": 0.50,  # PLACEHOLDER — adjust with planner
+
+    # A branch is tagged "Delayed" if more than this fraction of its
+    # non-completed activities have a positive delay_days value.
+    "delayed_pct": 0.30,   # PLACEHOLDER — adjust with planner
+
+    # A branch is tagged "At Risk" if its delayed OR critical ratio
+    # exceeds these lower thresholds (but doesn't reach Delayed/Critical).
+    "at_risk_delayed_pct": 0.10,   # PLACEHOLDER — adjust with planner
+    "at_risk_critical_pct": 0.20,  # PLACEHOLDER — adjust with planner
+}
+
 # ── LLM system prompts ────────────────────────────────────────────────────────
 ROUTER_PROMPT = """You are the Senior Intent Classifier for a Primavera P6 Schedule AI.
 Your goal is to decide if a query needs deterministic data analysis, conversational interpretation, or both.
@@ -36,10 +61,12 @@ AVAILABLE TOOLS:
 18. get_activity_code_types() - List all Activity Code Types, their scopes, and values defined in the project.
 19. get_activity_code_types_by_scope(scope: str) - List activity code types filtered by a specific scope (valid scopes: 'Project', 'Global', 'EPS'). Use when user asks "Show project activity codes" or "Show global activity codes".
 20. get_activity_code_values(code_type: str) - List all specific values for a given Activity Code Type (e.g. "What utilities exist?").
-21. get_activities_by_code(code_type: str, code_value: str, rollup: bool, exact_match: bool) - Filter activities by a specific Activity Code. Use when user asks for activities of a specific type/category/level/utility/area/trade. Set rollup=True if user asks for activities "under" or "within" a parent area (to include descendants). Set exact_match=True if user asks for activities "directly assigned" to a specific area.
+21. get_activities_by_code(code_type: str, code_value: str, rollup: bool, exact_match: bool) - Filter activities by a specific Activity Code. Use when user asks for activities of a specific type/category/level/utility/area/trade. IMPORTANT: If the user only provides the value (e.g. "Construction") without explicitly naming the type (e.g. "KPI" or "Levels"), you MUST leave code_type="" so the backend can resolve the ambiguity. Set rollup=True if user asks for activities "under" or "within" a parent area (to include descendants). Set exact_match=True if user asks for activities "directly assigned" to a specific area.
+22. get_wbs_branch_stats() - Get schedule performance per WBS branch. Returns activity count, variance days, delayed count, critical count, and a status tag (On Track/At Risk/Delayed/Critical) for each top-level WBS branch. Use when user asks: "How is each WBS performing?", "Show me branch status", "Which WBS is delayed?", "Show schedule performance by WBS", "SPI by branch" (when EV is not configured).
 
 ACTIVITY CODE ROUTING RULES:
 - When a user asks about "Construction activities", "Sewer activities", "Sector 1A", or any category that matches a detected Activity Code Type or Value, route to get_activities_by_code.
+- NEVER guess or auto-fill 'code_type' unless the user explicitly names it. If they just say "Show Construction activities", pass code_value="Construction" and code_type="".
 - When a user asks "which level/type/area/utility does activity X belong to?", route to get_activity_details — the response will include Activity Codes.
 - When a user asks "show me all code types" or "what activity codes are in this project?", route to get_activity_code_types.
 - When a user asks for codes by scope (e.g., "project activity codes", "global codes"), route to get_activity_code_types_by_scope.
@@ -53,6 +80,7 @@ ROUTING RULES:
 - If HYBRID_QUERY: Match to the relevant tool, but signal that interpretation is needed.
 - "Why", "Is it bad", "Explain the impact" questions should always be HYBRID or KNOWLEDGE.
 - FOLLOW-UP RESOLUTION: If the user asks "who is working on it?", "what about its delay?", "show me its resources", resolve "it/this/that" to the Last Activity Discussed (provided below). Include the resolved activity name in the arguments.
+- DISAMBIGUATION: If the user selects an item from a previous list (e.g. "5th one", "number 2"), you MUST review the conversation history, extract the EXACT code_value and code_type of the selected item, and call get_activities_by_code with those explicit values and exact_match=True. Do NOT output the disambiguation prompt again.
 
 Return ONLY a JSON object:
 {"query_type": "DATA_QUERY|KNOWLEDGE_QUERY|HYBRID_QUERY", "tool": "tool_name", "arguments": {}}"""
@@ -88,6 +116,7 @@ GUIDELINES:
   ├ Direct Assignments: 87
   ├ SECTOR 1A
   └ SECTOR 1B
+- WBS BRANCH STATS (template_type: wbs_branch_stats): When data comes from get_wbs_branch_stats, you MUST format as a markdown table with columns: WBS Branch | Activities | Delayed | Critical | Variance Days | Status. Add a prominent note at the top: "⚠️ Earned Value (SPI/CPI) is not available for this project — all activities use Duration % Complete. The Status Tag is derived from delay ratio and critical path ratio." Sort Critical/Delayed rows first. Explain the status logic briefly.
 - GREETINGS & CONVERSATION: If the user says "Hello", "Hi", "Good morning", or gives a standard greeting, you MUST reply warmly and professionally. Greet them back, state that you are their XerAgent planning assistant, and suggest a few specific things they can ask you about the schedule (e.g., critical path, delays, health score). Do NOT trigger the scope refusal. Do NOT claim that no data is loaded just because the data array is empty; a greeting simply doesn't require querying activities.
 - SCOPE REFUSAL: You only answer construction scheduling or project control questions related to the loaded project (e.g., '{PROJECT_NAME}'). If the user asks about weather, news, sports, or general off-topic questions (excluding standard greetings), you MUST refuse to answer. Use exactly this pattern for your summary: "I help with construction schedule questions for the '{PROJECT_NAME}' project. I don't answer weather, news, or general questions. Try asking about activities, variance, critical path, or trade scope status."
 - DUAL MODE: 
@@ -386,6 +415,8 @@ class XERAnalyzer:
                 limit=args.get("limit", 100),
                 context=ctx, version_id=selected_version
             )
+        elif tool == "get_wbs_branch_stats":
+            result = self.get_wbs_branch_stats(context=ctx, version_id=selected_version)
         else:
             result = {"success": False, "clarify": True, "total_count": 0, "data": []}
             
@@ -1030,6 +1061,114 @@ class XERAnalyzer:
         
         all_code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context)
         
+        # --- AMBIGUITY RESOLUTION START ---
+        if not code_type and code_value:
+            matches = []
+            cv_lower = code_value.strip().lower()
+            
+            # 1. Search Activity Codes
+            for c_type, info in all_code_types.items():
+                scope = info.get("scope", "Global")
+                for val in info.get("values", []):
+                    val_lower = val.lower()
+                    if exact_match:
+                        if cv_lower == val_lower:
+                            matches.append({"type": "code", "code_type": c_type, "value": val, "scope": scope, "exact": True})
+                    else:
+                        if cv_lower in val_lower:
+                            matches.append({"type": "code", "code_type": c_type, "value": val, "scope": scope, "exact": (cv_lower == val_lower)})
+                            
+            # 2. Search WBS
+            wbs_map = self._get_wbs_map(source)
+            for wbs_id, wbs_path in wbs_map.items():
+                w_name = str(wbs_path.split(" > ")[-1]).strip()
+                w_name_lower = w_name.lower()
+                if exact_match:
+                    if cv_lower == w_name_lower:
+                        matches.append({"type": "wbs", "value": w_name, "exact": True})
+                else:
+                    if cv_lower in w_name_lower:
+                        matches.append({"type": "wbs", "value": w_name, "exact": (cv_lower == w_name_lower)})
+
+            # Deduplicate matches
+            unique_matches = {}
+            for m in matches:
+                key = f"{m['type']}_{m.get('code_type', '')}_{m['value']}"
+                if key not in unique_matches:
+                    unique_matches[key] = m
+                elif m['exact'] and not unique_matches[key]['exact']:
+                    unique_matches[key] = m
+            matches = list(unique_matches.values())
+
+            if len(matches) > 1:
+                # Rank matches
+                def rank_score(m):
+                    score = 0
+                    if m.get("exact"): score += 1000
+                    if m.get("type") == "code":
+                        if str(m.get("scope", "")).lower() == "project":
+                            score += 500
+                    elif m.get("type") == "wbs":
+                        score += 400
+                    return score
+                
+                matches.sort(key=rank_score, reverse=True)
+                
+                # Check ambiguity
+                if matches[0].get("exact") and not matches[1].get("exact"):
+                    # Single strong match
+                    top_match = matches[0]
+                    if top_match["type"] == "code":
+                        code_type = top_match["code_type"]
+                        code_value = top_match["value"]
+                        exact_match = True
+                    else:
+                        # WBS unambiguous match, tell AI to use WBS filter
+                        return {
+                            "success": True, "total_count": 0, "displayed_count": 0, "data": [], "display_items": [], "all_items": [],
+                            "stats": {
+                                "no_match_reason": f"'{code_value}' is a WBS element, not an Activity Code. Please query WBS data directly or use get_delayed_activities with wbs_filter='{top_match['value']}'."
+                            }, "template_type": "list"
+                        }
+                else:
+                    # Ambiguous matches - return clarification prompt
+                    msg = f"I found multiple matches for '{code_value}'. Please ask the user to clarify by presenting this exact markdown list:\n\n"
+                    seen_display = set()
+                    display_cands = []
+                    for m in matches:
+                        if m["type"] == "code":
+                            disp = f"- **{m['value']}** ({m['code_type']})"
+                        else:
+                            disp = f"- **{m['value']}** (WBS)"
+                        if disp not in seen_display:
+                            seen_display.add(disp)
+                            display_cands.append(disp)
+                            
+                    msg += "\n".join(display_cands[:10])
+                    msg += "\n\nWhich one would you like to view?"
+                    
+                    return {
+                        "success": True, "total_count": 0, "displayed_count": 0, "data": [], "display_items": [], "all_items": [],
+                        "stats": {
+                            "filter": code_value,
+                            "no_match_reason": msg,
+                            "clarification_required": True
+                        }, "template_type": "list"
+                    }
+            elif len(matches) == 1:
+                top_match = matches[0]
+                if top_match["type"] == "code":
+                    code_type = top_match["code_type"]
+                    code_value = top_match["value"]
+                else:
+                    return {
+                        "success": True, "total_count": 0, "displayed_count": 0, "data": [], "display_items": [], "all_items": [],
+                        "stats": {
+                            "no_match_reason": f"'{code_value}' is a WBS element, not an Activity Code. Please query WBS data directly or use get_delayed_activities with wbs_filter='{top_match['value']}'."
+                        }, "template_type": "list"
+                    }
+        # --- AMBIGUITY RESOLUTION END ---
+
         code_filter = {"code_type": code_type, "code_value": code_value, "rollup": rollup, "exact_match": exact_match}
         filtered = self._filter_by_code(acts, code_filter, code_types=all_code_types)
         
@@ -1446,3 +1585,142 @@ class XERAnalyzer:
                 "stats": {"delay_days": act["delay_days"],
                           "predecessor_count": len(node.get("predecessors", [])),
                           "successor_count": len(node.get("successors", []))}, "template_type": "analysis"}
+
+    def get_wbs_branch_stats(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        """Returns per-WBS-branch schedule performance metrics without requiring EV configuration.
+        Exposes: activity_count, total_variance_days, critical_count, delayed_count, status_tag.
+        This is the SPI-equivalent when Earned Value is not configured in the project.
+        """
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        if not source:
+            return {"success": False, "error": "No schedule data loaded."}
+
+        vid = source['id']
+        hpd = source.get("hours_per_day", 8)
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
+        acts = analysis.get("activityAnalysis", {})
+        wbs_map = self._get_wbs_map(source)
+
+        # Build WBS parent map for branch resolution
+        wbs_df = source.get("df", {}).get("projwbs")
+        if wbs_df is None:
+            return {"success": False, "error": "No WBS data available."}
+
+        # Build: wbs_id -> wbs_name, wbs_id -> parent_wbs_id
+        wbs_id_to_name = {}
+        wbs_id_to_parent = {}
+        try:
+            for _, row in wbs_df.iterrows():
+                wid = str(row.get("wbs_id", ""))
+                wbs_id_to_name[wid] = str(row.get("wbs_name") or row.get("wbs_short_name") or wid)
+                parent = row.get("parent_wbs_id")
+                wbs_id_to_parent[wid] = str(parent) if parent and str(parent) != "nan" else None
+        except Exception as e:
+            logger.warning(f"WBS map build error: {e}")
+
+        # Walk up to find the top-level WBS branch for a given wbs_id
+        def get_top_branch(wid: str, visited=None) -> str:
+            if visited is None:
+                visited = set()
+            if wid in visited:
+                return wid
+            visited.add(wid)
+            parent = wbs_id_to_parent.get(wid)
+            if parent and parent in wbs_id_to_parent:  # has a grandparent → keep walking
+                return get_top_branch(parent, visited)
+            return wid  # this IS the top level
+
+        # Aggregate metrics per top-level WBS branch
+        branch_data: Dict[str, Dict] = {}
+
+        for tid, a in acts.items():
+            wid = str(a.get("wbs_id", ""))
+            branch_id = get_top_branch(wid)
+            branch_name = wbs_id_to_name.get(branch_id, branch_id)
+
+            if branch_name not in branch_data:
+                branch_data[branch_name] = {
+                    "wbs_branch": branch_name,
+                    "activity_count": 0,
+                    "total_variance_days": 0.0,
+                    "critical_count": 0,
+                    "delayed_count": 0,
+                    "completed_count": 0,
+                    "in_progress_count": 0,
+                    "not_started_count": 0,
+                }
+
+            b = branch_data[branch_name]
+            b["activity_count"] += 1
+
+            status = a.get("status_enum", "NOT_STARTED")
+            if status == "COMPLETED":
+                b["completed_count"] += 1
+            elif status == "IN_PROGRESS":
+                b["in_progress_count"] += 1
+            else:
+                b["not_started_count"] += 1
+
+            delay = a.get("delay_days") or 0
+            if delay > 0 and status != "COMPLETED":
+                b["delayed_count"] += 1
+                b["total_variance_days"] += delay
+
+            if a.get("is_critical_p6", False) and status != "COMPLETED":
+                b["critical_count"] += 1
+
+        # Derive status tag per branch
+        # Thresholds are read from WBS_STATUS_THRESHOLDS (top of file).
+        # These are placeholder values — confirm with planner before reporting.
+        t = WBS_STATUS_THRESHOLDS
+        def status_tag(b: Dict) -> str:
+            total = b["activity_count"]
+            if total == 0:
+                return "Empty"
+            delayed_pct = b["delayed_count"] / total
+            critical_pct = b["critical_count"] / total
+            if critical_pct > t["critical_pct"]:
+                return "Critical"
+            if delayed_pct > t["delayed_pct"]:
+                return "Delayed"
+            if delayed_pct > t["at_risk_delayed_pct"] or critical_pct > t["at_risk_critical_pct"]:
+                return "At Risk"
+            return "On Track"
+
+        results = []
+        for name, b in branch_data.items():
+            b["total_variance_days"] = round(b["total_variance_days"], 1)
+            b["status_tag"] = status_tag(b)
+            b["ev_note"] = "EV/PV not configured (Duration % Complete only). SPI unavailable."
+            results.append(b)
+
+        # Sort: Critical first, then by delayed count descending
+        status_order = {"Critical": 0, "Delayed": 1, "At Risk": 2, "On Track": 3, "Empty": 4}
+        results.sort(key=lambda x: (status_order.get(x["status_tag"], 9), -x["delayed_count"]))
+
+        data_ref = self.data_store.store_result(results)
+        total_acts = len(acts)
+        total_delayed = sum(b["delayed_count"] for b in results)
+        total_critical = sum(b["critical_count"] for b in results)
+
+        return {
+            "success": True,
+            "total_count": len(results),
+            "displayed_count": len(results),
+            "is_truncated": False,
+            "data": results,
+            "display_items": results,
+            "all_items": results,
+            "data_ref": data_ref,
+            "stats": {
+                "total_wbs_branches": len(results),
+                "total_project_activities": total_acts,
+                "total_delayed_activities": total_delayed,
+                "total_critical_activities": total_critical,
+                "ev_available": False,
+                "ev_note": "Earned Value not configured. All activities use Duration % Complete (CP_Drtn). act_reg_cost is zero across all TASKRSRC rows. SPI/CPI cannot be computed from this XER.",
+                "thresholds_applied": WBS_STATUS_THRESHOLDS,
+                "thresholds_note": "PLACEHOLDER values — not planner-approved. Review WBS_STATUS_THRESHOLDS in analyzer.py before using for reporting."
+            },
+            "template_type": "wbs_branch_stats"
+        }

@@ -1123,6 +1123,7 @@ class XERDataStore:
         tasks_df = source['df'].get('tasks')
         taskrsrc_df = source['df'].get('taskrsrc')
         baseline_cost_map = self._get_baseline_cost_map(context=context)
+        baseline_map = self._get_baseline_map(context=context)
         
         # Pre-aggregate TaskRSRC costs if available (Backup for missing task-level costs)
         task_rsrc_costs = {}
@@ -1182,7 +1183,7 @@ class XERDataStore:
                 
             # Inject Analysis
             analysis_dict = self.get_deterministic_analysis(source_id, context=context)
-            activity_metrics = analysis_dict.get('activityAnalysis', {})
+            activity_metrics = analysis_dict.get('activityAnalysis', {})\
             
             hpd = source.get('hours_per_day', 8.0)
             for rec in df.to_dict('records'):
@@ -1264,11 +1265,67 @@ class XERDataStore:
                     'early_finish': clean_rec.get('early_finish', ""),
                     'late_start': clean_rec.get('late_start', ""),
                     'late_finish': clean_rec.get('late_finish', ""),
+                    'baseline_finish': str(baseline_map.get(clean_rec.get('task_code', ''))) if clean_rec.get('task_code') in baseline_map else None,
                     'predecessors': source.get('dependency_graph', {}).get(tid, {}).get('predecessors', []),
                     'successors': source.get('dependency_graph', {}).get(tid, {}).get('successors', [])
                 }
                 tasks.append(clean_rec)
-                
+
+        # 1b. Always build analytics stubs — lightweight records for branch rollup.
+        #     When include_activities=True, stubs are derived from the full task records.
+        #     When include_activities=False (WBS tab), stubs are built from analysis only,
+        #     so rollup_stats() still has data to aggregate without rendering full rows.
+        analytics_stubs_by_wbs: Dict[str, List[Dict]] = {}
+        if tasks_df is not None:
+            analysis_dict_for_stubs = self.get_deterministic_analysis(source_id, context=context)
+            activity_metrics_stubs = analysis_dict_for_stubs.get('activityAnalysis', {})
+
+            if include_activities:
+                # Reuse already-built task records — extract wbs grouping + analysis
+                for t in tasks:
+                    wid = str(t.get('wbs_id', ''))
+                    if wid not in analytics_stubs_by_wbs:
+                        analytics_stubs_by_wbs[wid] = []
+                    analytics_stubs_by_wbs[wid].append(t)
+            else:
+                # Build minimal stubs from raw task DataFrame + analysis
+                # Note: tasks_df has scheduler-renamed columns (early_start, early_finish, etc.)
+                # after CPM runs — use those, not the raw P6 XER names (early_start_date etc.)
+                for rec in tasks_df.to_dict('records'):
+                    tid = rec.get('task_id')
+                    wid = str(rec.get('wbs_id', ''))
+                    if not wid or wid == 'nan':
+                        continue
+                    m = activity_metrics_stubs.get(tid, {})
+                    stub = {
+                        'task_name': rec.get('task_name', ''),
+                        'task_type': rec.get('task_type', ''),
+                        'wbs_id': wid,
+                        'budget_cost': 0.0,
+                        'actual_cost': 0.0,
+                        'remain_cost': 0.0,
+                        'ev_cost': 0.0,
+                        'pv_cost': 0.0,
+                        'bl_project_cost': 0.0,
+                        '_analysis': {
+                            'status': m.get('status_enum', 'NOT_STARTED'),
+                            'delay_days': float(m.get('delay_days') or 0),
+                            'is_critical': bool(m.get('is_critical_p6', False)),
+                            'total_float': float(m.get('float_hrs', 0)),
+                            # Use scheduler-renamed columns (added by CPMScheduler._apply_p6_stored_dates)
+                            'early_start': str(rec.get('early_start', '') or ''),
+                            'early_finish': str(rec.get('early_finish', '') or ''),
+                            'late_start': str(rec.get('late_start', '') or ''),
+                            'late_finish': str(rec.get('late_finish', '') or ''),
+                            'baseline_finish': str(baseline_map.get(rec.get('task_code', ''))) if rec.get('task_code') in baseline_map else None,
+                        }
+                    }
+                    if wid not in analytics_stubs_by_wbs:
+                        analytics_stubs_by_wbs[wid] = []
+                    analytics_stubs_by_wbs[wid].append(stub)
+
+
+
         # 2. Group tasks by wbs_id (ensure string keys for mapping)
         wbs_tasks = {}
         unassigned_tasks = []
@@ -1298,7 +1355,9 @@ class XERDataStore:
                 **rec,
                 "parent_wbs_id": pid,
                 "children": [],
-                "activities": wbs_tasks.get(wid, [])
+                "activities": wbs_tasks.get(wid, []),
+                # _analytics_activities always populated (stubs in WBS mode, full in Activity mode)
+                "_analytics_activities": analytics_stubs_by_wbs.get(wid, [])
             }
             
         # 4. Construct Tree
@@ -1352,12 +1411,46 @@ class XERDataStore:
                 
         for root in tree: sort_tree(root)
         
-        # 6. Rollup stats (Dates, Durations, Float)
+        # Import thresholds lazily to avoid circular dependency
+        try:
+            from .analyzer import WBS_STATUS_THRESHOLDS as _thresholds
+        except Exception:
+            _thresholds = {
+                "critical_pct": 0.50, "delayed_pct": 0.30,
+                "at_risk_delayed_pct": 0.10, "at_risk_critical_pct": 0.20,
+            }
+
+        def _branch_status(activity_count, delayed_count, critical_count, completed_count, branch_variance_days):
+            if activity_count == 0:
+                return "EMPTY"
+                
+            # Completed branch logic
+            if completed_count == activity_count:
+                if branch_variance_days <= 0:
+                    return "COMPLETED ON TIME"
+                else:
+                    return f"COMPLETED LATE (+{int(branch_variance_days)}d)"
+                    
+            t = _thresholds
+            d_pct = delayed_count / activity_count
+            c_pct = critical_count / activity_count
+            
+            if d_pct > t["delayed_pct"]:
+                return "DELAYED"
+            elif c_pct > t["critical_pct"]:
+                return "CRITICAL"
+            elif d_pct > t["at_risk_delayed_pct"] or c_pct > t["at_risk_critical_pct"]:
+                return "AT RISK"
+            else:
+                return "ON TRACK"
+
+        # 6. Rollup stats (Dates, Durations, Float, Branch Analytics)
         def rollup_stats(node):
             starts = []
             finishes = []
             late_starts = []
             late_finishes = []
+            bl_finishes = []
             min_float = float('inf')
             
             # Costs
@@ -1367,34 +1460,74 @@ class XERDataStore:
             ev_total = 0
             pv_total = 0
             bl_project_total = 0
+
+            # Branch Analytics
+            activity_count = 0
+            delayed_count = 0
+            critical_count = 0
+            completed_count = 0
+            total_delay_days = 0.0
+            worst_delayed_activity = None
+            worst_delay_days = 0.0
             
-            # Activity Rollup — read from _analysis dict (populated after CPM)
-            for act in node.get('activities', []):
+            # Activity Rollup — dates and costs
+            # Use 'activities' (full records) when available (Activities tab).
+            # Fall back to '_analytics_activities' stubs in WBS-only mode so
+            # dates/duration still roll up even when full records aren't loaded.
+            acts_for_dates = node.get('activities') or node.get('_analytics_activities', [])
+            for act in acts_for_dates:
                 analysis_data = act.get('_analysis', {})
                 es = pd.to_datetime(analysis_data.get('early_start'), errors='coerce')
                 ef = pd.to_datetime(analysis_data.get('early_finish'), errors='coerce')
                 ls = pd.to_datetime(analysis_data.get('late_start'), errors='coerce')
                 lf = pd.to_datetime(analysis_data.get('late_finish'), errors='coerce')
+                bl_f = pd.to_datetime(analysis_data.get('baseline_finish'), errors='coerce')
                 f = pd.to_numeric(analysis_data.get('total_float'), errors='coerce')
                 
                 if pd.notnull(es): starts.append(es)
                 if pd.notnull(ef): finishes.append(ef)
                 if pd.notnull(ls): late_starts.append(ls)
                 if pd.notnull(lf): late_finishes.append(lf)
+                if pd.notnull(bl_f): bl_finishes.append(bl_f)
                 
                 # Primavera ignores COMPLETED, WBS Summary, and LOE activities when rolling up float for WBS rows
                 task_type = act.get('task_type', '')
-                if pd.notnull(f) and analysis_data.get('status') != 'COMPLETED' and task_type not in ('TT_WBS', 'TT_LOE'):
+                act_status = analysis_data.get('status', 'NOT_STARTED')
+                if pd.notnull(f) and act_status != 'COMPLETED' and task_type not in ('TT_WBS', 'TT_LOE'):
                     min_float = min(min_float, f)
 
-                # Costs
+                # Costs (only meaningful when full records are loaded)
                 budget_total += act.get('budget_cost', 0)
                 actual_total += act.get('actual_cost', 0)
                 remain_total += act.get('remain_cost', 0)
                 ev_total += act.get('ev_cost', 0)
                 pv_total += act.get('pv_cost', 0)
                 bl_project_total += act.get('bl_project_cost', 0)
-            
+
+            # Branch Analytics — uses '_analytics_activities' which is always populated
+            # (stubs in WBS-only mode, same full records in Activities mode)
+            for act in node.get('_analytics_activities', node.get('activities', [])):
+                analysis_data = act.get('_analysis', {})
+                task_type = act.get('task_type', '')
+                act_status = analysis_data.get('status', 'NOT_STARTED')
+
+                if task_type not in ('TT_WBS', 'TT_LOE'):
+                    activity_count += 1
+                    delay = float(analysis_data.get('delay_days') or 0)
+                    is_critical = bool(analysis_data.get('is_critical', False))
+                    
+                    if act_status == 'COMPLETED':
+                        completed_count += 1
+                        
+                    if delay > 0 and act_status != 'COMPLETED':
+                        delayed_count += 1
+                        total_delay_days += delay
+                        if delay > worst_delay_days:
+                            worst_delay_days = delay
+                            worst_delayed_activity = act.get('task_name', '')
+                    if is_critical and act_status != 'COMPLETED':
+                        critical_count += 1
+
             # Children Rollup
             for child in node.get('children', []):
                 child_stats = rollup_stats(child)
@@ -1402,6 +1535,7 @@ class XERDataStore:
                 if child_stats.get('early_finish'): finishes.append(pd.to_datetime(child_stats['early_finish']))
                 if child_stats.get('late_start'): late_starts.append(pd.to_datetime(child_stats['late_start']))
                 if child_stats.get('late_finish'): late_finishes.append(pd.to_datetime(child_stats['late_finish']))
+                if child_stats.get('baseline_finish'): bl_finishes.append(pd.to_datetime(child_stats['baseline_finish']))
                 if child_stats.get('min_float') is not None: min_float = min(min_float, child_stats['min_float'])
 
                 # Costs
@@ -1412,11 +1546,36 @@ class XERDataStore:
                 pv_total += child_stats.get('pv_cost', 0)
                 bl_project_total += child_stats.get('bl_project_cost', 0)
 
+                # Branch Analytics Rollup
+                activity_count += child_stats.get('activity_count', 0)
+                delayed_count += child_stats.get('delayed_count', 0)
+                critical_count += child_stats.get('critical_count', 0)
+                completed_count += child_stats.get('completed_count', 0)
+                total_delay_days += child_stats.get('_total_delay_days_sum', 0.0) # Summed internally for average
+                
+                child_worst = child_stats.get('worst_delay_days', 0.0)
+                if child_worst > worst_delay_days:
+                    worst_delay_days = child_worst
+                    worst_delayed_activity = child_stats.get('worst_delayed_activity')
+
             # Calculate Summary Dates
             s = min(starts) if starts else None
             f = max(finishes) if finishes else None
             ls_date = min(late_starts) if late_starts else None
             lf_date = max(late_finishes) if late_finishes else None
+            bl_f_date = max(bl_finishes) if bl_finishes else None
+
+            # Branch Finish Variance (Latest Finish minus Latest Baseline Finish)
+            branch_variance_days = 0.0
+            if f and bl_f_date:
+                # Assuming business days difference
+                if f > bl_f_date:
+                    branch_variance_days = float(proj_cal.workdays_between(bl_f_date, f))
+                elif f < bl_f_date:
+                    branch_variance_days = -float(proj_cal.workdays_between(f, bl_f_date))
+                    
+            # Average Delay
+            avg_delay_days = total_delay_days / delayed_count if delayed_count > 0 else 0.0
 
             # Duration in WORKING days, matching P6's WBS summary display
             dur = 0
@@ -1435,6 +1594,18 @@ class XERDataStore:
             if wbs_float is not None and (pd.isna(wbs_float) or wbs_float == float('inf')):
                 wbs_float = 0.0
 
+            # Criticality tag — always valid, even in baseline-only mode
+            # Describes schedule structure/sensitivity, NOT delay performance
+            crit_pct = critical_count / activity_count if activity_count > 0 else 0
+            if crit_pct >= 0.60:
+                criticality_tag = 'HIGH CRITICALITY'    # PLACEHOLDER threshold — confirm with planner
+            elif crit_pct >= 0.30:
+                criticality_tag = 'MEDIUM CRITICALITY'  # PLACEHOLDER threshold — confirm with planner
+            elif crit_pct > 0:
+                criticality_tag = 'LOW CRITICALITY'
+            else:
+                criticality_tag = 'NOT CRITICAL'
+
             node['summary'] = {
                 'early_start': str(s.date()) if s else None,
                 'early_finish': str(f.date()) if f else None,
@@ -1448,19 +1619,40 @@ class XERDataStore:
                 'ev_cost': ev_total,
                 'pv_cost': pv_total,
                 'bl_project_cost': bl_project_total,
-                'at_completion_cost': actual_total + remain_total
+                'at_completion_cost': actual_total + remain_total,
+                # Branch analytics
+                'activity_count': activity_count,
+                'delayed_count': delayed_count,
+                'critical_count': critical_count,
+                'completed_count': completed_count,
+                'critical_pct': round(crit_pct * 100, 1),
+                'branch_variance_days': round(branch_variance_days, 1),
+                'worst_delayed_activity': worst_delayed_activity,
+                'worst_delay_days': round(worst_delay_days, 1),
+                'avg_delay_days': round(avg_delay_days, 1),
+                '_total_delay_days_sum': total_delay_days,
+                'baseline_finish': str(bl_f_date.date()) if bl_f_date else None,
+                # Performance tag (only meaningful when update schedule is loaded)
+                'status_tag': _branch_status(activity_count, delayed_count, critical_count, completed_count, branch_variance_days),
+                # Structure tag (always valid — describes critical path density)
+                'criticality_tag': criticality_tag,
             }
             return node['summary']
 
         for root in tree: rollup_stats(root)
-        
+
         analysis = self.get_deterministic_analysis(source_id, context=context)
 
-        
+        # Determine schedule mode — affects which status columns the UI shows
+        # A baseline schedule never has performance/variance data, even if an update
+        # exists in the workspace. Only show update columns when viewing an update.
+        schedule_mode = 'WITH_UPDATE' if source.get('type') == 'update' else 'BASELINE_ONLY'
+
         return {
             "records": tree,
             "total": sum(len(wbs_tasks[w]) for w in wbs_tasks),
             "table": "HIERARCHY",
+            "schedule_mode": schedule_mode,
             "projectAnalysis": analysis.get('projectSummary', {})
         }
 

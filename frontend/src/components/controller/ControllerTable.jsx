@@ -153,8 +153,54 @@ const TaskRow = React.memo(({ task, formatP6Date }) => {
     </div>
   );
 });
+const WBS_STATUS_COLORS = {
+  'CRITICAL':  { bg: 'bg-red-100',    text: 'text-red-700',    dot: 'bg-red-500'    },
+  'DELAYED':   { bg: 'bg-orange-100', text: 'text-orange-700', dot: 'bg-orange-500' },
+  'AT RISK':   { bg: 'bg-yellow-100', text: 'text-yellow-700', dot: 'bg-yellow-500' },
+  'ON TRACK':  { bg: 'bg-emerald-100',text: 'text-emerald-700',dot: 'bg-emerald-500'},
+  'EMPTY':     { bg: 'bg-gray-100',   text: 'text-gray-400',   dot: 'bg-gray-300'   },
+};
 
-const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, showActivities }) => {
+const WBS_CRITICALITY_COLORS = {
+  'HIGH CRITICALITY':   { bg: 'bg-red-50',     text: 'text-red-600',     border: 'border-red-200' },
+  'MEDIUM CRITICALITY': { bg: 'bg-orange-50',  text: 'text-orange-600',  border: 'border-orange-200' },
+  'LOW CRITICALITY':    { bg: 'bg-yellow-50',  text: 'text-yellow-600',  border: 'border-yellow-200' },
+  'NOT CRITICAL':       { bg: 'bg-slate-50',   text: 'text-slate-500',   border: 'border-slate-200' },
+  'EMPTY':              { bg: 'bg-transparent',text: 'text-transparent', border: 'border-transparent' },
+};
+
+
+const WbsStatusBadge = ({ tag }) => {
+  if (!tag) return <div className="w-36 shrink-0" />;
+  
+  let c;
+  if (tag.startsWith('COMPLETED LATE')) {
+    c = { bg: 'bg-red-50', text: 'text-red-700', dot: 'bg-red-500' };
+  } else if (tag === 'COMPLETED ON TIME') {
+    c = { bg: 'bg-green-100', text: 'text-green-700', dot: 'bg-green-500' };
+  } else {
+    c = WBS_STATUS_COLORS[tag] || WBS_STATUS_COLORS['EMPTY'];
+  }
+  
+  return (
+    <div className={`w-36 shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full ${c.bg}`}>
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${c.dot}`} />
+      <span className={`text-[9px] font-black uppercase tracking-wide ${c.text} truncate`}>{tag}</span>
+    </div>
+  );
+};
+
+const WbsCriticalityBadge = ({ tag }) => {
+  if (!tag || tag === 'EMPTY') return <div className="w-24 shrink-0" />;
+  const c = WBS_CRITICALITY_COLORS[tag] || WBS_CRITICALITY_COLORS['NOT CRITICAL'];
+  return (
+    <div className={`w-24 shrink-0 flex items-center justify-center px-1.5 py-0.5 rounded border ${c.bg} ${c.border}`}>
+      <span className={`text-[8.5px] font-bold uppercase tracking-wide ${c.text} truncate`}>{tag}</span>
+    </div>
+  );
+};
+
+const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, showActivities, scheduleMode }) => {
   const [isExpanded, setIsExpanded] = useState(level === 0 || defaultExpanded);
   
   const hasChildren = node.children && node.children.length > 0;
@@ -163,12 +209,11 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
   return (
     <div className="flex flex-col text-sm">
       <div 
-        className={`flex items-center py-2 px-3 hover:bg-gray-50 border-b border-gray-200 cursor-pointer ${level === 0 ? 'bg-gray-100/80 shadow-sm sticky top-0 z-10' : 'bg-white'}`}
-        style={{ paddingLeft: `${(level * 24) + 16}px` }}
+        className={`flex items-center py-2 hover:bg-gray-50 border-b border-gray-200 cursor-pointer ${level === 0 ? 'bg-gray-100/80 shadow-sm sticky top-0 z-10' : 'bg-white'}`}
         onClick={() => setIsExpanded(!isExpanded)}
       >
         {/* ID Column */}
-        <div className="w-36 shrink-0 flex items-center gap-1.5 overflow-hidden">
+        <div className="w-36 shrink-0 flex items-center gap-1.5 overflow-hidden pl-3 pr-1">
           <div className="w-4 h-4 shrink-0 flex items-center justify-center text-gray-400">
             {(hasChildren || hasActivities) ? (
               isExpanded ? <ChevronDown size={14} /> : <ChevronRightIcon size={14} />
@@ -178,15 +223,58 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
         </div>
 
         {/* Name Column */}
-        <div className="flex-1 px-2 flex items-center gap-2 truncate">
+        <div className="flex-1 min-w-[300px] flex items-center gap-2 truncate pr-2" style={{ paddingLeft: `${(level * 24) + 8}px` }}>
           <div className="text-blue-600 shrink-0">
              {isExpanded ? <FolderOpen size={16} className="fill-blue-100" /> : <Folder size={16} className="fill-blue-50" />}
           </div>
-          <span className="font-bold text-[12px] text-gray-900 truncate tracking-tight">{node.wbs_name}</span>
+          <span className="font-bold text-[12px] text-gray-900 truncate tracking-tight" title={node.wbs_name}>{node.wbs_name}</span>
         </div>
 
-        {/* Status Column (Summary Row usually doesn't have one status, but we can leave space) */}
-        <div className="w-24 shrink-0" />
+        {/* Branch Analytics */}
+        <div className="w-16 shrink-0 px-1 text-[10px] font-bold text-gray-700 text-center">
+          {node.summary?.activity_count ?? '-'}
+        </div>
+        
+        {scheduleMode === 'WITH_UPDATE' ? (
+          <>
+            <div className="w-16 shrink-0 px-1 text-[10px] font-bold text-center" style={{ color: (node.summary?.delayed_count || 0) > 0 ? '#c2410c' : '#6b7280' }}>
+              {node.summary?.delayed_count ?? '-'}
+            </div>
+            <div className="w-16 shrink-0 px-1 text-[10px] font-bold text-center" style={{ color: (node.summary?.critical_count || 0) > 0 ? '#b91c1c' : '#6b7280' }}>
+              {node.summary?.critical_count ?? '-'}
+            </div>
+            <div className="w-20 shrink-0 px-1 text-[10px] font-black text-center" style={{ color: (node.summary?.branch_variance_days || 0) > 0 ? '#92400e' : (node.summary?.branch_variance_days || 0) < 0 ? '#15803d' : '#6b7280' }}>
+              {(node.summary?.branch_variance_days || 0) > 0 ? `+${node.summary.branch_variance_days}d` : (node.summary?.branch_variance_days || 0) < 0 ? `${node.summary.branch_variance_days}d` : '-'}
+            </div>
+            <div className="w-20 shrink-0 px-1 text-[10px] font-black text-center" style={{ color: (node.summary?.worst_delay_days || 0) > 0 ? '#b91c1c' : '#6b7280' }}
+              title={node.summary?.worst_delayed_activity ? `Worst: ${node.summary.worst_delayed_activity}` : undefined}>
+              {(node.summary?.worst_delay_days || 0) > 0 ? `+${node.summary.worst_delay_days}d` : '-'}
+            </div>
+            <div className="w-16 shrink-0 px-1 text-[10px] font-bold text-center" style={{ color: (node.summary?.avg_delay_days || 0) > 0 ? '#c2410c' : '#6b7280' }}>
+              {(node.summary?.avg_delay_days || 0) > 0 ? `+${node.summary.avg_delay_days}d` : '-'}
+            </div>
+            <div className={`w-16 shrink-0 px-1 text-[10px] text-center font-bold ${(node.summary?.min_float || 0) < 0 ? 'text-red-700' : 'text-gray-500'}`}>
+              {node.summary?.min_float != null ? Number(node.summary.min_float).toFixed(1) : '-'}
+            </div>
+            <WbsStatusBadge tag={node.summary?.status_tag} />
+          </>
+        ) : (
+          <>
+            <div className="w-16 shrink-0 px-1 text-[10px] font-bold text-center" style={{ color: (node.summary?.critical_count || 0) > 0 ? '#b91c1c' : '#6b7280' }}>
+              {node.summary?.critical_count ?? '-'}
+            </div>
+            <div className="w-16 shrink-0 px-1 text-[10px] font-bold text-center text-gray-500">
+              {node.summary?.critical_pct != null ? `${node.summary.critical_pct}%` : '-'}
+            </div>
+            <div className="w-20 shrink-0 px-1 text-[10px] font-bold text-center text-gray-500">
+              {node.summary?.min_float != null ? Number(node.summary.min_float).toFixed(1) : '-'}
+            </div>
+            <WbsCriticalityBadge tag={node.summary?.criticality_tag} />
+          </>
+        )}
+
+        {/* Status Column (empty spacer, replaced by badge) */}
+        <div className="w-0 shrink-0" />
 
         {/* Duration Column */}
         <div className="w-14 shrink-0 px-1 text-[9px] font-black text-gray-700 text-center bg-gray-100/50 rounded-md py-0.5 mx-1">
@@ -198,9 +286,6 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
         <div className="w-20 shrink-0 px-1 text-[9px] font-bold text-gray-800 text-center">{formatP6Date(node.summary?.early_finish)}</div>
         <div className="w-20 shrink-0 px-1 text-[9px] font-medium text-gray-400 text-center opacity-60">{formatP6Date(node.summary?.late_start)}</div>
         <div className="w-20 shrink-0 px-1 text-[9px] font-medium text-gray-400 text-center opacity-60">{formatP6Date(node.summary?.late_finish)}</div>
-        <div className={`w-16 shrink-0 px-1 text-[10px] text-right font-black ${(node.summary?.min_float || 0) < 0 ? 'text-red-700' : 'text-gray-500'}`}>
-          {node.summary?.min_float != null ? Number(node.summary.min_float).toFixed(2) : '-'}
-        </div>
 
         {/* Summary Cost Columns - Moved to end */}
         <div className="w-24 shrink-0 px-1 text-[9px] font-bold text-gray-500 text-right bg-gray-50/20">{formatCurrency(node.summary?.bl_project_cost)}</div>
@@ -245,6 +330,7 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
               formatP6Date={formatP6Date} 
               defaultExpanded={defaultExpanded}
               showActivities={showActivities}
+              scheduleMode={scheduleMode}
             />
           ))}
         </div>
@@ -284,18 +370,36 @@ const ControllerTable = ({
           )}
           <div className="flex-1 overflow-y-auto overflow-x-auto scrollbar-thin scrollbar-thumb-gray-200 relative">
             {isHierarchy ? (
-               <div className="flex flex-col min-w-[1650px]">
+               <div className="flex flex-col min-w-[1850px]">
                  {/* Global Sticky Header for Hierarchy */}
                  <div className="flex items-center py-2.5 px-3 bg-gray-50 border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest sticky top-0 z-30 shadow-sm">
                    <div className="w-36 shrink-0 px-1">ID</div>
-                   <div className="flex-1 px-2">WBS Name / Activity Name</div>
-                   <div className="w-24 shrink-0 px-1 text-center">Status</div>
+                   <div className="flex-1 min-w-[300px] px-2">WBS Name / Activity Name</div>
+                   <div className="w-16 shrink-0 px-1 text-center">Acts</div>
+                   {tableData.schedule_mode === 'WITH_UPDATE' ? (
+                     <>
+                       <div className="w-16 shrink-0 px-1 text-center">Delayed</div>
+                       <div className="w-16 shrink-0 px-1 text-center">Critical</div>
+                       <div className="w-20 shrink-0 px-1 text-center">Branch Var</div>
+                       <div className="w-20 shrink-0 px-1 text-center">Worst Delay</div>
+                       <div className="w-16 shrink-0 px-1 text-center">Avg Delay</div>
+                       <div className="w-16 shrink-0 px-1 text-center">Float</div>
+                       <div className="w-36 shrink-0 px-1 text-center">Status</div>
+                     </>
+                   ) : (
+                     <>
+                       <div className="w-16 shrink-0 px-1 text-center">Critical</div>
+                       <div className="w-16 shrink-0 px-1 text-center">Crit %</div>
+                       <div className="w-20 shrink-0 px-1 text-center">Float</div>
+                       <div className="w-24 shrink-0 px-1 text-center">Criticality</div>
+                     </>
+                   )}
+                   <div className="w-0 shrink-0" />
                    <div className="w-14 shrink-0 px-1 text-center">Dur</div>
                    <div className="w-20 shrink-0 px-1 text-center">ES</div>
                    <div className="w-20 shrink-0 px-1 text-center">EF</div>
                    <div className="w-20 shrink-0 px-1 text-center">LS</div>
                    <div className="w-20 shrink-0 px-1 text-center">LF</div>
-                   <div className="w-16 shrink-0 px-1 text-right">Float</div>
                    <div className="w-24 shrink-0 px-1 text-right">BL Project Cost</div>
                    <div className="w-24 shrink-0 px-1 text-right">Budgeted Cost</div>
                    <div className="w-24 shrink-0 px-1 text-right">EV Cost</div>
@@ -310,6 +414,7 @@ const ControllerTable = ({
                        formatP6Date={formatP6Date} 
                        defaultExpanded={isFiltered}
                        showActivities={showActivities}
+                       scheduleMode={tableData.schedule_mode || 'BASELINE_ONLY'}
                      />
                    ))
                  ) : (
