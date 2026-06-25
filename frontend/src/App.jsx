@@ -15,6 +15,9 @@ import ControllerToolbar from './components/controller/ControllerToolbar'
 import ControllerTable from './components/controller/ControllerTable'
 import ControllerFloatingChat from './components/controller/ControllerFloatingChat'
 import ResourceView from './components/controller/ResourceView'
+import CalendarSummary from './components/controller/CalendarSummary'
+import DashboardView from './components/controller/DashboardView'
+import { UploadWarningModal, UploadErrorModal } from './components/UploadModals'
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -38,6 +41,7 @@ function App() {
   const [tablePage, setTablePage] = useState(1)
   const [tableSearch, setTableSearch] = useState('')
   const [viewerFilter, setViewerFilter] = useState('ALL') // 'ALL', 'CRITICAL', 'NEG_FLOAT', 'POS_FLOAT', 'DELAYED', 'DELAYED_CRITICAL', 'DELAYED_NEGATIVE'
+  const [evmMethodology, setEvmMethodology] = useState('LABOR')
   const [query, setQuery] = useState('')
   const [messages, setMessages] = useState([])
   const [auditVersions, setAuditVersions] = useState([])
@@ -115,8 +119,12 @@ function App() {
     }
   }
 
-  const handleUpload = async (e, type = 'baseline') => {
-    const file = e.target.files[0]
+  const [uploadWarning, setUploadWarning] = useState(null)
+  const [uploadError, setUploadError] = useState(null)
+
+  const handleUpload = async (eOrFile, type = 'baseline', overrideProgress = false, overridePairing = false) => {
+    // Determine if we received an event or a direct file object
+    const file = eOrFile?.target?.files ? eOrFile.target.files[0] : eOrFile;
     if (!file) return
 
     setLoading(true)
@@ -124,6 +132,8 @@ function App() {
     formData.append('file', file)
     formData.append('file_type', type)
     formData.append('context', viewMode)
+    if (overrideProgress) formData.append('override_progress', 'true')
+    if (overridePairing) formData.append('override_pairing', 'true')
     
     try {
       const res = await axios.post('/api/upload-xer', formData)
@@ -138,14 +148,42 @@ function App() {
           setSelectedControllerVersionId(res.data.version_id)
         }
         fetchVersions(viewMode)
+        // Clear modals on success
+        setUploadWarning(null)
+        setUploadError(null)
       }
     } catch (err) {
       console.error(err)
-      alert('Upload failed: ' + (err.response?.data?.detail || err.message))
+      const detail = err.response?.data?.detail
+      if (detail && typeof detail === 'object') {
+        if (detail.type === 'warning') {
+          setUploadWarning({ ...detail, originalFile: file, uploadType: type })
+          return // do not alert
+        } else if (detail.type === 'error') {
+          setUploadError(detail)
+          return // do not alert
+        }
+      }
+      alert('Upload failed: ' + (typeof detail === 'string' ? detail : err.message))
     } finally {
       setLoading(false)
+      if (eOrFile?.target) {
+        eOrFile.target.value = ''
+      }
     }
   }
+
+  const handleUploadWarningContinue = () => {
+    if (!uploadWarning) return;
+    const { originalFile, uploadType, warning_type } = uploadWarning;
+    const overrideProg = warning_type === 'baseline_progress';
+    const overridePair = warning_type === 'project_mismatch';
+    
+    setUploadWarning(null);
+    handleUpload(originalFile, uploadType, overrideProg, overridePair);
+  }
+
+  const [baselineError, setBaselineError] = useState(null)
 
   const fetchTableData = async () => {
     try {
@@ -157,8 +195,15 @@ function App() {
       if (!selectedId) return
 
       setIsTableLoading(true)
+      setBaselineError(null)
       const res = await axios.get(`/api/xer-data?table=${reqTable}&page=${tablePage}&search=${tableSearch}&version_id=${selectedId}&filter=${viewerFilter}&context=${viewMode}`)
-      setTableData(res.data)
+      
+      if (res.data.success === false) {
+        setBaselineError(res.data)
+        setTableData({ records: [], total: 0 })
+      } else {
+        setTableData(res.data)
+      }
     } catch (err) {
       console.error('Failed to fetch table data', err)
     } finally {
@@ -575,7 +620,10 @@ function App() {
       'ev_cost': 'Earned Value Cost',
       'pv_cost': 'Planned Value Cost',
       'at_completion_cost': 'At Completion Cost',
-      'bl_project_cost': 'BL Project Total Cost'
+      'bl_project_cost': 'BL Project Total Cost',
+      'float_risk': 'Float Risk',
+      'bl_float_days': 'Baseline Float',
+      'float_consumed_pct': 'Float Consumed %'
     }
     return labels[key] || key.replace(/_/g, ' ').replace('hr cnt', '(hrs)').replace('pred type', 'Type').toUpperCase()
   }
@@ -665,9 +713,15 @@ function App() {
               isControllerChatOpen={isControllerChatOpen}
               setIsControllerChatOpen={setIsControllerChatOpen}
               tableData={tableData}
+              evmMethodology={evmMethodology}
+              setEvmMethodology={setEvmMethodology}
             />
             {viewerTable === 'RESOURCES' ? (
               <ResourceView context="controller" />
+            ) : viewerTable === 'CALENDARS' ? (
+              <CalendarSummary context="controller" />
+            ) : viewerTable === 'DASHBOARD' ? (
+              <DashboardView context="controller" />
             ) : (
               <ControllerTable 
                 tableData={tableData}
@@ -679,9 +733,11 @@ function App() {
                 tablePage={tablePage}
                 setTablePage={setTablePage}
                 formatP6Date={formatP6Date}
+                baselineError={baselineError}
                 getHeaderLabel={getHeaderLabel}
                 hasProject={controllerBaselineLoaded}
                 isTableLoading={isTableLoading}
+                evmMethodology={evmMethodology}
               />
             )}
             
@@ -703,6 +759,22 @@ function App() {
           </div>
         ) : null}
       </div>
+
+      {/* UX validation modals */}
+      <UploadWarningModal 
+        warning={uploadWarning} 
+        onContinue={handleUploadWarningContinue} 
+        onCancel={() => setUploadWarning(null)} 
+      />
+      <UploadErrorModal 
+        error={uploadError} 
+        onUploadBaseline={(e) => {
+          setUploadError(null);
+          handleUpload(e, 'baseline');
+        }}
+        onCancel={() => setUploadError(null)} 
+      />
+
     </div>
   )
 }

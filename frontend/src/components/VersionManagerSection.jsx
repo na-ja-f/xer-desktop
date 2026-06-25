@@ -2,6 +2,8 @@ import React from 'react';
 import { Upload, Trash2 } from 'lucide-react';
 
 const VersionManagerSection = ({ versions, selectedVersionId, setSelectedVersionId, handleDeleteVersion, handleUpload, loading, mode = 'full', showUpdates = false }) => {
+  const hasBaseline = versions.some(v => v.type === 'baseline');
+
   if (mode === 'toolbar' || mode === 'compact_row') {
     return (
       <div className={`flex items-center gap-4 py-1 ${mode === 'compact_row' ? 'bg-white rounded-2xl border border-gray-200 px-6 py-3 shadow-sm mx-6 my-4' : ''}`}>
@@ -42,10 +44,16 @@ const VersionManagerSection = ({ versions, selectedVersionId, setSelectedVersion
                   <button onClick={(e) => handleDeleteVersion(e, v.id)} className="hover:text-red-400"><Trash2 size={12} /></button>
                 </div>
               ))}
-              <label className="flex items-center gap-1.5 px-3 py-1.5 border border-dashed border-gray-200 rounded-lg text-gray-400 cursor-pointer hover:bg-gray-50 transition-all shrink-0">
-                <Upload size={12} />
-                <input type="file" hidden accept=".xer" onChange={(e) => handleUpload(e, 'update')} disabled={loading} />
-              </label>
+              {hasBaseline ? (
+                <label className="flex items-center gap-1.5 px-3 py-1.5 border border-dashed border-gray-200 rounded-lg text-gray-400 cursor-pointer hover:bg-gray-50 transition-all shrink-0">
+                  <Upload size={12} />
+                  <input type="file" hidden accept=".xer" onChange={(e) => handleUpload(e, 'update')} disabled={loading} />
+                </label>
+              ) : (
+                <div onClick={() => alert("Please upload a Project (Baseline) file first before adding updates.")} className="flex items-center gap-1.5 px-3 py-1.5 border border-dashed border-gray-200 rounded-lg text-gray-300 cursor-pointer hover:bg-gray-50 transition-all shrink-0">
+                  <Upload size={12} />
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -127,11 +135,18 @@ const VersionManagerSection = ({ versions, selectedVersionId, setSelectedVersion
                 </div>
               </div>
             ))}
-            <label className={`flex-shrink-0 ${isCompact ? 'w-24' : 'w-48'} flex flex-col items-center justify-center p-2 border-2 border-dashed border-gray-100 rounded-xl cursor-pointer hover:bg-gray-50 transition-all group`}>
-              <Upload size={isCompact ? 16 : 20} className="text-gray-400 group-hover:text-blue-500 transition-colors mb-1" />
-              <span className="text-[9px] font-black text-gray-500 uppercase group-hover:text-blue-700 transition-colors text-center leading-tight">Add Update</span>
-              <input type="file" hidden accept=".xer" onChange={(e) => handleUpload(e, 'update')} disabled={loading} />
-            </label>
+            {hasBaseline ? (
+              <label className={`flex-shrink-0 ${isCompact ? 'w-24' : 'w-48'} flex flex-col items-center justify-center p-2 border-2 border-dashed border-gray-100 rounded-xl cursor-pointer hover:bg-gray-50 transition-all group`}>
+                <Upload size={isCompact ? 16 : 20} className="text-gray-400 group-hover:text-blue-500 transition-colors mb-1" />
+                <span className="text-[9px] font-black text-gray-500 uppercase group-hover:text-blue-700 transition-colors text-center leading-tight">Add Update</span>
+                <input type="file" hidden accept=".xer" onChange={(e) => handleUpload(e, 'update')} disabled={loading} />
+              </label>
+            ) : (
+              <div onClick={() => alert("Please upload a Project (Baseline) file first before adding updates.")} className={`flex-shrink-0 ${isCompact ? 'w-24' : 'w-48'} flex flex-col items-center justify-center p-2 border-2 border-dashed border-gray-100 rounded-xl cursor-pointer hover:bg-gray-50 transition-all group`}>
+                <Upload size={isCompact ? 16 : 20} className="text-gray-300 group-hover:text-orange-500 transition-colors mb-1" />
+                <span className="text-[9px] font-black text-gray-400 uppercase group-hover:text-orange-600 transition-colors text-center leading-tight">Add Update</span>
+              </div>
+            )}
           </div>
         </div>
       )}

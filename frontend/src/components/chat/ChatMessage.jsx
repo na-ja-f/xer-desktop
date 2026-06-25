@@ -75,7 +75,7 @@ function ListTemplate({ content }) {
           <div className="flex items-center gap-2">
             <Activity size={12} className="text-blue-500 animate-pulse" />
             <span className="text-xs font-black text-blue-700 uppercase tracking-widest">
-              Showing {content.displayed_count} of {content.total_count} activities
+              Showing {content.displayed_count} of {content.total_count} items
               {content.stats?.total_project_activities ? ` (${((content.total_count / content.stats.total_project_activities) * 100).toFixed(1)}% of project)` : ''}
             </span>
           </div>

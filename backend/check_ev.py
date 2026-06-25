@@ -1,43 +1,63 @@
 import sys, os
-sys.path.append(os.path.abspath("."))
-from modules.extractor import CompleteXERExtractor
 import pandas as pd
+sys.path.append(os.path.abspath('backend'))
+from modules.extractor import CompleteXERExtractor
+from modules.data_store import XERDataStore
 
-xer_path = "/Users/shibilmuhammad/Documents/Career/Al Amrah_Infra Package 01_Baseline Program Rev 00.xer"
-extractor = CompleteXERExtractor(xer_path)
-data = extractor.extract_all()
-dfs = {t: pd.DataFrame(data.tables[t]) for t in data.tables if data.tables[t]}
+store = XERDataStore()
 
-task = dfs['TASK']
-proj = dfs['PROJECT']
+ext_bl = CompleteXERExtractor('/Users/shibilmuhammad/Documents/Career/Al Amrah_Infra Package 01_Baseline Program Rev 00.xer', 'baseline')
+ext_bl.extract_all()
+data_bl = ext_bl.get_complete_data()
+store.add_version(data_bl, data_bl['project']['project_name'], data_bl['project']['data_date'], type='baseline', context='test')
 
-# EV check
-print("=== complete_pct_type distribution ===")
-print(task['complete_pct_type'].value_counts())
+ext_upd = CompleteXERExtractor('/Users/shibilmuhammad/Documents/Career/AMR-UPD-29-Nov 25  AL AMRAH INFRASTRUCTURE PACKAGE -01.xer', 'update')
+ext_upd.extract_all()
+data_upd = ext_upd.get_complete_data()
+store.add_version(data_upd, data_upd['project']['project_name'], data_upd['project']['data_date'], type='update', context='test')
 
-print("\n=== phys_complete_pct > 0 ===")
-pct = pd.to_numeric(task['phys_complete_pct'], errors='coerce').fillna(0)
-print(f"  rows > 0: {(pct > 0).sum()} / {len(task)}")
+upd_source = store.get_version(context='test')
+bl_source = store.get_baseline(context='test')
 
-print("\n=== TASKRSRC cost fields ===")
-if 'TASKRSRC' in dfs:
-    tr = dfs['TASKRSRC']
-    for col in ['target_cost', 'act_reg_cost', 'remain_cost']:
-        if col in tr.columns:
-            vals = pd.to_numeric(tr[col], errors='coerce').fillna(0)
-            print(f"  {col}: nonzero={( vals > 0).sum()}, max={vals.max():.2f}")
+tasks = upd_source['df']['tasks']
+taskrsrc = upd_source['df']['taskrsrc']
 
-print("\n=== PROJECT EV settings ===")
-ev_cols = [c for c in proj.columns if 'ev' in c.lower() or 'earn' in c.lower() or 'pct' in c.lower()]
-print(f"  EV-related columns found: {ev_cols}")
-for c in ev_cols:
-    print(f"  {c}: {proj[c].tolist()}")
+print("Columns in TASK table related to EV/cost:")
+cost_cols = [c for c in tasks.columns if 'cost' in c.lower() or 'ev' in c.lower() or 'earned' in c.lower() or 'bcwp' in c.lower() or 'bcws' in c.lower() or 'acwp' in c.lower() or 'act_' in c.lower() or 'perf' in c.lower() or 'pct' in c.lower()]
+print(cost_cols)
 
-print("\n=== VERDICT ===")
-pct_types = task['complete_pct_type'].unique().tolist()
-if all(p == 'CP_Drtn' for p in pct_types):
-    print("  RESULT: Duration % Complete only. EV/PV NOT calculable.")
-elif 'CP_Phys' in pct_types:
-    print("  RESULT: Physical % Complete detected. EV MAY be partially calculable.")
-else:
-    print(f"  RESULT: Mixed types: {pct_types}")
+# We want BAC, PV, EV, AC for each activity.
+# Since EV should be BAC * Performance % Complete
+# In P6, Activity % Complete is stored in a column, maybe `phys_complete_pct` or we calculate it.
+print("\nSample TASK data:")
+has_act = tasks[pd.to_numeric(tasks['act_cost'], errors='coerce') > 0] if 'act_cost' in tasks.columns else tasks.head(20)
+print(has_act[[c for c in ['task_code', 'act_cost', 'target_cost', 'phys_complete_pct', 'complete_pct_type', 'act_this_per_cost', 'ev_cost', 'bcwp', 'bcws', 'acwp', 'earned_value'] if c in has_act.columns]].head())
+
+# Let's see how many have act_reg_cost > 0 in TASKRSRC
+tr_act_reg = pd.to_numeric(taskrsrc['act_reg_cost'], errors='coerce').fillna(0)
+print(f"\nNumber of TASKRSRC assignments with act_reg_cost > 0: {(tr_act_reg > 0).sum()}")
+print(f"Number of TASKRSRC assignments with act_reg_cost = 0: {(tr_act_reg == 0).sum()}")
+
+# Let's show 20 activities with BAC, PV, EV, AC, SPI, CPI from the CURRENT data_store output
+# I will use data_store.get_table_data with HIERARCHY to see the leaf nodes
+leaves = store.get_table_data('HIERARCHY', page=1, page_size=20, search='', version_id=upd_source['id'], context='test', filter_type='ALL')
+
+print("\nSample of 20 activities with calculated metrics:")
+print(f"{'Activity ID':<20} | {'BAC':<12} | {'PV':<12} | {'EV':<12} | {'AC':<12} | {'SPI':<5} | {'CPI':<5}")
+print("-" * 95)
+def print_tree(nodes):
+    for n in nodes:
+        if not n.get('is_branch'):
+            m = n.get('metrics', {})
+            bac = m.get('budget_cost', 0)
+            pv = m.get('pv_cost', 0)
+            ev = m.get('ev_cost', 0)
+            ac = m.get('actual_cost', 0)
+            spi = m.get('spi', 0)
+            cpi = m.get('cpi', 0)
+            if bac > 0 or ac > 0:
+                print(f"{n.get('id'):<20} | ${bac:<11.2f} | ${pv:<11.2f} | ${ev:<11.2f} | ${ac:<11.2f} | {spi:<5.2f} | {cpi:<5.2f}")
+        if 'children' in n:
+            print_tree(n['children'])
+
+print_tree(leaves.get('data', []))

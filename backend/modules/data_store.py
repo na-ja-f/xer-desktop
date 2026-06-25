@@ -25,8 +25,6 @@ class XERDataStore:
         version_id = f"{type}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}"
         if type == "baseline":
             version_id = f"baseline_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}"
-            # If it's a baseline, we might want to clear previous versions for this context if it's a fresh start?
-            # User didn't specify, so we'll just add it.
             
         # Extract hours_per_day from CALENDAR if available
         hpd = 8.0 # Default
@@ -40,11 +38,17 @@ class XERDataStore:
                             break
                         except:
                             continue
+
+        # Extract proj_short_name for B-040 pairing validation
+        proj_short_name = name  # name is already proj_short_name from extractor
+        if 'tables' in data and 'PROJECT' in data['tables'] and data['tables']['PROJECT']:
+            proj_short_name = data['tables']['PROJECT'][0].get('proj_short_name', name)
         
         versions[version_id] = {
             'id': version_id,
             'type': type,
             'name': name,
+            'proj_short_name': proj_short_name,
             'data_date': data_date,
             'data': data,
             'df': self._create_dataframes(data),
@@ -61,7 +65,17 @@ class XERDataStore:
         ctx["active_version_id"] = version_id
         if context in self._cached_stats:
             del self._cached_stats[context]
+
+        # B-040: Validate baseline pairing after adding a version
+        pairing = self.validate_baseline_pairing(context=context)
+        ctx["baseline_pairing"] = pairing
+        if pairing.get("valid"):
+            print(f"B-040: Valid baseline pair — overlap {pairing['overlap_pct']:.1f}%, baseline='{pairing['baseline_name']}', update='{pairing['update_name']}'")
+        elif pairing.get("reason"):
+            print(f"B-040: {pairing['reason']}")
+
         return version_id
+
 
     def _build_dependency_graph(self, version_id: str, context: str = "audit"):
         """Builds a human-readable dependency map for each activity."""
@@ -384,12 +398,168 @@ class XERDataStore:
         return None
 
     def get_baseline(self, context: str = "audit") -> Optional[Dict]:
+        """Return the validated baseline for the given context.
+        Only returns a baseline if B-040 pairing validation passes."""
         ctx = self.contexts.get(context, self.contexts["audit"])
-        # Find the first version of type 'baseline'
-        for v in ctx["versions"].values():
-            if v["type"] == "baseline":
-                return v
+        pairing = ctx.get("baseline_pairing", {})
+        
+        # If pairing has been validated and is valid, return the paired baseline
+        if pairing.get("valid") and pairing.get("paired_baseline_id"):
+            return ctx["versions"].get(pairing["paired_baseline_id"])
+        
+        # If no pairing result yet (first load), try to find and validate
+        baselines = [v for v in ctx["versions"].values() if v["type"] == "baseline"]
+        if not baselines:
+            return None
+        
+        # Re-validate
+        pairing = self.validate_baseline_pairing(context=context)
+        ctx["baseline_pairing"] = pairing
+        if pairing.get("valid") and pairing.get("paired_baseline_id"):
+            return ctx["versions"].get(pairing["paired_baseline_id"])
+        
         return None
+
+    def validate_baseline_pairing(self, context: str = "audit") -> Dict:
+        """B-040: Validate baseline-update pairing.
+        
+        Criteria:
+        1. proj_short_name must match
+        2. Activity overlap (by task_code) must be >= 80%
+        
+        Returns a dict with:
+        - valid: bool
+        - reason: str (rejection message if invalid)
+        - paired_baseline_id, paired_update_id, overlap_pct
+        - baseline_name, update_name
+        - baseline_proj_short_name, update_proj_short_name
+        """
+        ctx = self.contexts.get(context, self.contexts["audit"])
+        versions = ctx["versions"]
+        
+        if not versions:
+            return {"valid": False, "reason": "No versions loaded."}
+        
+        # Find the latest update
+        updates = [v for v in versions.values() if v['type'] == 'update']
+        if not updates:
+            # No update loaded — check if only baseline exists
+            baselines = [v for v in versions.values() if v['type'] == 'baseline']
+            if baselines:
+                return {"valid": False, "reason": "Only baseline schedule loaded. Upload an update to enable variance analysis."}
+            return {"valid": False, "reason": "No versions loaded."}
+        
+        updates.sort(key=lambda x: x['data_date'])
+        update = updates[-1]
+        
+        # Find the latest baseline
+        baselines = [v for v in versions.values() if v['type'] == 'baseline']
+        if not baselines:
+            return {
+                "valid": False,
+                "reason": "Baseline schedule not found. Upload a baseline to enable variance analysis.",
+                "update_name": update.get("name", ""),
+                "update_proj_short_name": update.get("proj_short_name", ""),
+            }
+        
+        baselines.sort(key=lambda x: x['data_date'])
+        baseline = baselines[-1]
+        
+        # Extract proj_short_name
+        bl_proj = baseline.get("proj_short_name", baseline.get("name", ""))
+        up_proj = update.get("proj_short_name", update.get("name", ""))
+        
+        # 1. Check proj_short_name match
+        proj_match = bl_proj.strip().lower() == up_proj.strip().lower()
+        
+        # 2. Calculate activity overlap by task_code
+        bl_tasks = set()
+        up_tasks = set()
+        
+        bl_df = baseline.get("df", {}).get("tasks")
+        up_df = update.get("df", {}).get("tasks")
+        
+        if bl_df is not None and not bl_df.empty and "task_code" in bl_df.columns:
+            bl_tasks = set(bl_df["task_code"].dropna().unique())
+        if up_df is not None and not up_df.empty and "task_code" in up_df.columns:
+            up_tasks = set(up_df["task_code"].dropna().unique())
+        
+        common = bl_tasks & up_tasks
+        max_count = max(len(bl_tasks), len(up_tasks), 1)  # avoid div by zero
+        overlap_pct = (len(common) / max_count) * 100
+        
+        result = {
+            "paired_baseline_id": baseline["id"],
+            "paired_update_id": update["id"],
+            "overlap_pct": round(overlap_pct, 1),
+            "baseline_name": baseline.get("name", ""),
+            "update_name": update.get("name", ""),
+            "baseline_proj_short_name": bl_proj,
+            "update_proj_short_name": up_proj,
+            "baseline_activity_count": len(bl_tasks),
+            "update_activity_count": len(up_tasks),
+            "common_activity_count": len(common),
+            "proj_name_match": proj_match,
+        }
+        
+        # Validation rules: In P6, proj_short_name often changes between BL and UPD.
+        # Rely primarily on activity task_code overlap.
+        if overlap_pct < 80:
+            result["valid"] = False
+            result["reason"] = (
+                f"Baseline and update do not appear to belong to the same project. "
+                f"Activity overlap is only {overlap_pct:.1f}% (minimum 80% required). "
+                f"Baseline: '{result['baseline_name']}' ({len(bl_tasks)} activities), "
+                f"Update: '{result['update_name']}' ({len(up_tasks)} activities)."
+            )
+            return result
+        
+        # Valid pair
+        result["valid"] = True
+        result["reason"] = None
+        return result
+
+    def check_pairing_heuristics(self, update_data: Dict, baselines: list, context: str = "audit") -> Dict:
+        """
+        Fast heuristic check for project matching during file upload before saving.
+        Compares the new update data directly with the latest baseline.
+        """
+        if not baselines:
+            return {"valid": False, "overlap_pct": 0}
+            
+        baselines.sort(key=lambda x: x['data_date'])
+        baseline = baselines[-1]
+        
+        bl_proj = baseline.get("proj_short_name", baseline.get("name", ""))
+        up_proj = update_data.get("project", {}).get("project_name", "")
+        
+        bl_tasks = set()
+        up_tasks = set()
+        
+        bl_df = baseline.get("df", {}).get("tasks")
+        up_tasks_raw = update_data.get("tasks", [])
+        
+        if bl_df is not None and not bl_df.empty and "task_code" in bl_df.columns:
+            bl_tasks = set(bl_df["task_code"].dropna().unique())
+            
+        up_tasks = set(t.get('task_code') for t in up_tasks_raw if t.get('task_code'))
+        
+        common = bl_tasks & up_tasks
+        max_count = max(len(bl_tasks), len(up_tasks), 1)
+        overlap_pct = (len(common) / max_count) * 100
+        
+        return {
+            "valid": overlap_pct >= 80,
+            "overlap_pct": round(overlap_pct, 1),
+            "baseline_name": baseline.get("name", ""),
+            "update_name": up_proj,
+            "baseline_proj_short_name": bl_proj,
+            "update_proj_short_name": up_proj,
+            "baseline_activity_count": len(bl_tasks),
+            "update_activity_count": len(up_tasks),
+            "common_activity_count": len(common)
+        }
+
 
     def get_update_by_month(self, month: str, context: str = "audit") -> Optional[Dict]:
         month_map = {
@@ -491,21 +661,89 @@ class XERDataStore:
         df['_dt_target_end_date'] = pd.to_datetime(df['target_end_date'], errors='coerce')
         return df.set_index('task_code')['_dt_target_end_date'].to_dict()
 
-    def _get_baseline_cost_map(self, context: str = "audit") -> Dict[str, float]:
-        """Helper to get task_code -> target_cost from baseline"""
+    def _get_baseline_dates_map(self, context: str = "audit") -> Dict[str, Dict[str, pd.Timestamp]]:
+        """Helper to get task_code -> {start, finish} from baseline"""
         baseline = self.get_baseline(context=context)
         if not baseline or 'df' not in baseline or 'tasks' not in baseline['df']:
             return {}
         df = baseline['df']['tasks'].copy()
-        # Check for multiple possible field names
+        
+        # Normalize baseline dates
+        date_mapping = {
+            '_dt_target_start_date': ['target_start_date', 'plan_start_date', 'start_date'],
+            '_dt_target_end_date': ['target_end_date', 'plan_end_date', 'finish_date', 'scd_end_date']
+        }
+        for internal_col, xer_cols in date_mapping.items():
+            val = None
+            for col in xer_cols:
+                if col in df.columns:
+                    val = pd.to_datetime(df[col], errors='coerce')
+                    break
+            df[internal_col] = val
+            
+        dates_map = {}
+        for _, row in df.iterrows():
+            code = row.get('task_code')
+            if code:
+                dates_map[code] = {
+                    'start': row['_dt_target_start_date'],
+                    'finish': row['_dt_target_end_date']
+                }
+        return dates_map
+
+    def _get_baseline_float_map(self, context: str = "audit") -> Dict[str, float]:
+        """Helper to get task_code -> baseline float hours from baseline"""
+        baseline = self.get_baseline(context=context)
+        if not baseline or 'df' not in baseline or 'tasks' not in baseline['df']:
+            return {}
+        df = baseline['df']['tasks'].copy()
+        float_col = None
+        for col in ['total_float_hr_cnt', 'target_tf_hr_cnt', 'tf_hr_cnt']:
+            if col in df.columns:
+                float_col = col
+                break
+        if float_col:
+            df['bl_float_hrs'] = pd.to_numeric(df[float_col], errors='coerce').fillna(0.0)
+            return df.set_index('task_code')['bl_float_hrs'].to_dict()
+        return {}
+
+    def _get_baseline_cost_map(self, context: str = "audit") -> Dict[str, float]:
+        """Helper to get task_code -> budgeted cost from baseline.
+        Checks TASK table first, then falls back to TASKRSRC aggregation."""
+        baseline = self.get_baseline(context=context)
+        if not baseline or 'df' not in baseline or 'tasks' not in baseline['df']:
+            return {}
+        df = baseline['df']['tasks'].copy()
+
+        # Try task-level cost column first
         cost_col = None
         for col in ['target_cost', 'target_tot_cost', 'planned_tot_cost']:
             if col in df.columns:
                 cost_col = col
                 break
-        
-        if not cost_col: return {}
-        return df.set_index('task_code')[cost_col].apply(lambda x: pd.to_numeric(x, errors='coerce') or 0).to_dict()
+
+        task_cost_map = {}
+        if cost_col:
+            task_cost_map = df.set_index('task_code')[cost_col].apply(
+                lambda x: pd.to_numeric(x, errors='coerce') or 0
+            ).to_dict()
+
+        # If task-level costs are all zero, aggregate from TASKRSRC
+        if not task_cost_map or all(v == 0 for v in task_cost_map.values()):
+            taskrsrc_df = baseline['df'].get('taskrsrc')
+            if taskrsrc_df is not None and not taskrsrc_df.empty:
+                rsrc = taskrsrc_df.copy()
+                rsrc['target_cost'] = pd.to_numeric(rsrc.get('target_cost', 0), errors='coerce').fillna(0)
+                rsrc_agg = rsrc.groupby('task_id')['target_cost'].sum()
+                # Map task_id -> task_code
+                tid_to_code = df.set_index('task_id')['task_code'].to_dict()
+                task_cost_map = {}
+                for tid, cost in rsrc_agg.items():
+                    code = tid_to_code.get(tid)
+                    if code:
+                        task_cost_map[code] = float(cost)
+
+        return task_cost_map
 
     def get_deterministic_analysis(self, version_id: Optional[str] = None, context: str = "audit") -> Dict:
         """
@@ -568,14 +806,22 @@ class XERDataStore:
 
         df['status_enum'] = df.apply(calc_status, axis=1)
         df['is_critical_p6'] = df['float_hrs'] <= 0
+        if 'path_id' not in df.columns:
+            df['path_id'] = None
 
-        # 2.5. Unified Current End Date Logic
+        # 2.5. Unified Current Dates Logic
         def get_current_end_date(row):
             act = row.get('_dt_act_end_date')
             plan = row.get('_dt_target_end_date')
             return act if pd.notnull(act) else plan
 
+        def get_current_start_date(row):
+            act = row.get('_dt_act_start_date')
+            plan = row.get('_dt_target_start_date')
+            return act if pd.notnull(act) else plan
+
         df['_dt_current_end_date'] = df.apply(get_current_end_date, axis=1)
+        df['_dt_current_start_date'] = df.apply(get_current_start_date, axis=1)
         df['is_predicted_date'] = pd.isnull(df['_dt_act_end_date']) & pd.notnull(df['_dt_target_end_date'])
 
         # 3. Precision P6 Delay Calculation (BASELINE vs UPDATE PLANNED)
@@ -621,6 +867,120 @@ class XERDataStore:
             return "NORMAL"
 
         df['delay_float_category'] = df.apply(classify_matrix, axis=1)
+
+        # 4.5. New Execution Delay & At Risk Classification
+        baseline_dates_map = self._get_baseline_dates_map(context=context)
+        bl_float_map = self._get_baseline_float_map(context=context)
+        data_date_val = source.get('data_date') or source.get('stats', {}).get('data_date')
+        if not data_date_val or data_date_val == "N/A":
+            proj_data = source.get('data', {}).get('project', [])
+            if isinstance(proj_data, list) and proj_data:
+                data_date_val = proj_data[0].get('last_recalc_date')
+            elif isinstance(proj_data, dict):
+                data_date_val = proj_data.get('last_recalc_date')
+
+        data_date = None
+        if data_date_val:
+            try:
+                data_date = pd.to_datetime(str(data_date_val)[:10])
+            except:
+                pass
+
+        dur_col = 'target_drtn_hr_cnt' if 'target_drtn_hr_cnt' in df.columns else 'orig_dur_hr_cnt'
+
+        def classify_task(row):
+            code = row.get('task_code')
+            status = row.get('status_enum', 'NOT_STARTED')
+            
+            dates = baseline_dates_map.get(code, {})
+            bl_start = dates.get('start')
+            bl_finish = dates.get('finish')
+            
+            if pd.isnull(bl_start):
+                bl_start = row.get('_dt_target_start_date')
+            if pd.isnull(bl_finish):
+                bl_finish = row.get('_dt_target_end_date')
+                
+            act_finish = row.get('_dt_act_end_date')
+            current_finish = act_finish if pd.notnull(act_finish) else row.get('_dt_target_end_date')
+            
+            forecast_slip = 0.0
+            if pd.notnull(current_finish) and pd.notnull(bl_finish) and current_finish > bl_finish:
+                forecast_slip = float((current_finish - bl_finish).days)
+                
+            duration_hrs = pd.to_numeric(row.get(dur_col, 0), errors='coerce') or 0.0
+            duration_days = duration_hrs / hpd
+            
+            threshold = max(5.0, 0.05 * duration_days)
+            
+            # Calculate Float Consumption & Float Risk (B-039)
+            bl_f_hrs = bl_float_map.get(code, 0.0)
+            curr_f_hrs = row['float_hrs']
+            
+            if status == 'COMPLETED':
+                float_consumption = 0.0
+                float_risk = 'Stable'
+            else:
+                if curr_f_hrs <= 0.0:
+                    float_consumption = 1.0
+                    float_risk = 'Critical'
+                elif bl_f_hrs <= 0.0:
+                    float_consumption = 0.0
+                    float_risk = 'Stable'
+                else:
+                    float_consumption = (bl_f_hrs - curr_f_hrs) / bl_f_hrs
+                    if float_consumption > 0.75:
+                        float_risk = 'At Risk'
+                    elif float_consumption >= 0.50:
+                        float_risk = 'Watching'
+                    else:
+                        float_risk = 'Stable'
+            
+            is_delayed = False
+            is_completed_late = False
+            classification = "ON_TRACK"
+            
+            if pd.notnull(data_date) and not is_baseline_only:
+                if status == 'NOT_STARTED':
+                    if pd.notnull(bl_start) and bl_start <= data_date:
+                        is_delayed = True
+                elif status == 'IN_PROGRESS':
+                    if pd.notnull(bl_finish) and bl_finish <= data_date:
+                        is_delayed = True
+                elif status == 'COMPLETED':
+                    if pd.notnull(act_finish) and pd.notnull(bl_finish) and act_finish > bl_finish:
+                        is_completed_late = True
+                        
+                if is_delayed:
+                    classification = "DELAYED"
+                elif is_completed_late:
+                    classification = "COMPLETED_LATE"
+                elif status != 'COMPLETED':
+                    if float_risk == 'At Risk':
+                        classification = "AT_RISK"
+                    elif float_risk == 'Watching':
+                        classification = "WATCHING"
+            
+            return pd.Series({
+                'classification': classification,
+                'forecast_slip_days': forecast_slip,
+                'threshold_days': threshold,
+                'bl_start_date': str(bl_start.date()) if pd.notnull(bl_start) and hasattr(bl_start, 'date') else (str(bl_start)[:10] if pd.notnull(bl_start) else None),
+                'bl_finish_date': str(bl_finish.date()) if pd.notnull(bl_finish) and hasattr(bl_finish, 'date') else (str(bl_finish)[:10] if pd.notnull(bl_finish) else None),
+                'bl_float_days': bl_f_hrs / hpd,
+                'float_consumed_pct': float_consumption,
+                'float_risk': float_risk
+            })
+
+        classified_cols = df.apply(classify_task, axis=1)
+        df['classification'] = classified_cols['classification']
+        df['forecast_slip_days'] = classified_cols['forecast_slip_days']
+        df['threshold_days'] = classified_cols['threshold_days']
+        df['bl_start_date'] = classified_cols['bl_start_date']
+        df['bl_finish_date'] = classified_cols['bl_finish_date']
+        df['bl_float_days'] = classified_cols['bl_float_days']
+        df['float_consumed_pct'] = classified_cols['float_consumed_pct']
+        df['float_risk'] = classified_cols['float_risk']
 
         # 5. Project-Level Calculation
         baseline_max_finish = max(baseline_map.values()) if baseline_map else df['_dt_target_end_date'].max()
@@ -833,13 +1193,25 @@ class XERDataStore:
             
         top_neg_float = df[df['float_hrs'] < 0].sort_values('float_hrs').head(20)
 
+        execution_delayed_count = int((df['classification'] == 'DELAYED').sum())
+        at_risk_count = int((df['float_risk'] == 'At Risk').sum())
+        watching_count = int((df['float_risk'] == 'Watching').sum())
+        b039_critical_count = int(((df['status_enum'] != 'COMPLETED') & (df['float_hrs'] <= 0)).sum())
+        completed_late_count = int((df['classification'] == 'COMPLETED_LATE').sum())
+        on_track_count = total_tasks - execution_delayed_count - at_risk_count - watching_count - b039_critical_count
+
         metrics = {
             "totalTasks": total_tasks,
             "completedTasks": len(df[df['status_enum'] == "COMPLETED"]),
             "inProgressTasks": len(df[df['status_enum'] == "IN_PROGRESS"]),
             "notStartedTasks": len(df[df['status_enum'] == "NOT_STARTED"]),
-            "delayedTasks": int((numeric_delays > 0).sum()),
-            "criticalCount": critical_count,
+            "delayedTasks": execution_delayed_count,
+            "executionDelayedCount": execution_delayed_count,
+            "atRiskCount": at_risk_count,
+            "watchingCount": watching_count,
+            "onTrackCount": on_track_count,
+            "completedLateCount": completed_late_count,
+            "criticalCount": b039_critical_count,
             "negativeFloatCount": neg_float_count,
             "projectHealthScore": score,
             "healthStatus": health_status,
@@ -865,7 +1237,7 @@ class XERDataStore:
                 "topRisks": top_neg_float[['task_code', 'task_name', 'float_hrs']].to_dict('records')
             },
             "activityAnalysis": self._inject_activity_codes(
-                df[['task_id', 'task_code', 'task_name', 'status_enum', 'delay_days', 'float_hrs', 'delay_float_category', 'is_critical_p6', 'is_predicted_date', '_dt_current_end_date']].set_index('task_id').to_dict('index'),
+                df[['task_id', 'task_code', 'task_name', 'status_enum', 'delay_days', 'float_hrs', 'delay_float_category', 'is_critical_p6', 'path_id', 'is_predicted_date', '_dt_current_end_date', '_dt_current_start_date', 'classification', 'forecast_slip_days', 'threshold_days', 'bl_start_date', 'bl_finish_date', 'bl_float_days', 'float_consumed_pct', 'float_risk']].set_index('task_id').to_dict('index'),
                 source
             )
         }
@@ -898,7 +1270,7 @@ class XERDataStore:
         }
 
     def get_calendar_info(self, version_id: Optional[str] = None, context: str = "audit") -> List[Dict]:
-        """Returns structured calendar data from the loaded XER file."""
+        """Returns structured calendar data from the loaded XER file (B-041 enhanced)."""
         source = self.get_latest(context=context, version_id=version_id)
         if not source:
             return []
@@ -906,10 +1278,25 @@ class XERDataStore:
         calendars_df = source['df'].get('calendar', source['df'].get('CALENDAR'))
         project_df = source['df'].get('project', source['df'].get('PROJECT'))
 
-        # Get the default project calendar ID
+        # Get the default project calendar ID and project dates
         default_cal_id = None
+        proj_start_str = None
+        proj_finish_str = None
         if project_df is not None and not project_df.empty:
             default_cal_id = str(project_df.iloc[0].get('clndr_id', ''))
+            
+            # Extract project window safely
+            ps = project_df.iloc[0].get('plan_start_date')
+            if pd.notna(ps):
+                try:
+                    proj_start_str = pd.to_datetime(ps).strftime('%Y-%m-%d')
+                except: pass
+                
+            pe = project_df.iloc[0].get('scd_end_date', project_df.iloc[0].get('plan_end_date'))
+            if pd.notna(pe):
+                try:
+                    proj_finish_str = pd.to_datetime(pe).strftime('%Y-%m-%d')
+                except: pass
 
         if calendars_df is None or calendars_df.empty:
             return []
@@ -924,15 +1311,171 @@ class XERDataStore:
             except (ValueError, TypeError):
                 pass
 
+            # B-041: Instantiate P6Calendar to get parsed working days and exceptions
+            cal_obj = P6Calendar(row.to_dict())
+            semantic_tags = P6Calendar.detect_semantic_tags(name)
+            
+            # B-041: Compute effective exceptions
+            raw_non_working = cal_obj.get_holiday_dates()
+            raw_working = cal_obj.get_working_exception_dates()
+            
+            effective_non_working = []
+            effective_working = []
+            
+            if proj_start_str and proj_finish_str:
+                effective_non_working = [d for d in raw_non_working if proj_start_str <= d <= proj_finish_str]
+                effective_working = [d for d in raw_working if proj_start_str <= d <= proj_finish_str]
+            else:
+                effective_non_working = raw_non_working
+                effective_working = raw_working
+
             results.append({
                 "id": cal_id,
                 "name": name,
                 "hours_per_day": hours_per_day,
                 "is_project_default": (cal_id == default_cal_id),
                 "type": row.get('clndr_type', 'Unknown'),
+                # Project Window
+                "project_start": proj_start_str,
+                "project_finish": proj_finish_str,
+                # B-041 enhancements
+                "working_days": cal_obj.get_working_day_names(),
+                "workweek_pattern": cal_obj.get_workweek_pattern(),
+                "workweek_type": cal_obj.get_workweek_type(),
+                "raw_non_working_dates": raw_non_working,
+                "raw_non_working_dates_count": len(raw_non_working),
+                "effective_non_working_dates": effective_non_working,
+                "effective_non_working_dates_count": len(effective_non_working),
+                "raw_working_overrides": raw_working,
+                "raw_working_overrides_count": len(raw_working),
+                "effective_working_overrides": effective_working,
+                "effective_working_overrides_count": len(effective_working),
+                # Legacy fallback fields
+                "non_working_exceptions_count": len(raw_non_working),
+                "non_working_exceptions": raw_non_working,
+                "working_exceptions_count": len(raw_working),
+                "working_exceptions": raw_working,
+                "semantic_tags": semantic_tags,
             })
 
         return results
+
+    def get_calendar_map(self, version_id: Optional[str] = None, context: str = "audit") -> Dict[str, Dict]:
+        """B-041: Return {clndr_id: {name, hours_per_day, workweek_type, semantic_tags}} for joining with activities.
+        Cached per version in source dict."""
+        source = self.get_latest(context=context, version_id=version_id)
+        if not source:
+            return {}
+        
+        # Check cache
+        if '_calendar_map' in source:
+            return source['_calendar_map']
+        
+        cal_infos = self.get_calendar_info(version_id=version_id, context=context)
+        cal_map = {}
+        for c in cal_infos:
+            cal_map[c["id"]] = {
+                "name": c["name"],
+                "hours_per_day": c["hours_per_day"],
+                "workweek_type": c["workweek_type"],
+                "working_days": c["working_days"],
+                "semantic_tags": c["semantic_tags"],
+                "non_working_exceptions_count": c["non_working_exceptions_count"],
+                "non_working_exceptions": c["non_working_exceptions"],
+                "working_exceptions_count": c["working_exceptions_count"],
+                "working_exceptions": c["working_exceptions"],
+                "is_project_default": c["is_project_default"],
+            }
+        
+        source['_calendar_map'] = cal_map
+        return cal_map
+
+    def get_activities_by_calendar(self, calendar_name: Optional[str] = None, calendar_id: Optional[str] = None,
+                                    workweek_type: Optional[str] = None, semantic_tag: Optional[str] = None,
+                                    limit: int = 50, version_id: Optional[str] = None, context: str = "audit") -> Dict:
+        """B-041: Filter activities by calendar criteria."""
+        source = self.get_latest(context=context, version_id=version_id)
+        if not source or 'tasks' not in source.get('df', {}):
+            return {"success": False, "error": "No schedule data loaded."}
+        
+        cal_map = self.get_calendar_map(version_id=version_id, context=context)
+        tasks_df = source['df']['tasks']
+        
+        if tasks_df.empty or 'clndr_id' not in tasks_df.columns:
+            return {"success": False, "error": "No calendar assignments found in task data."}
+        
+        # Build set of matching calendar IDs
+        matching_cal_ids = set()
+        for cid, cinfo in cal_map.items():
+            match = True
+            if calendar_id and cid != str(calendar_id):
+                match = False
+            if calendar_name:
+                search_str = calendar_name.lower().replace(" ", "").replace("-", "").replace("_", "")
+                target_str = cinfo["name"].lower().replace(" ", "").replace("-", "").replace("_", "")
+                if search_str not in target_str:
+                    match = False
+            if workweek_type:
+                # Match "7-day", "7-day calendar", "7", etc.
+                wt_search = workweek_type.lower().replace(" calendar", "").replace("-day", "").strip()
+                wt_actual = str(len(cinfo.get("working_days", [])))
+                if wt_search != wt_actual:
+                    match = False
+            if semantic_tag and semantic_tag.upper() not in [t.upper() for t in cinfo.get("semantic_tags", [])]:
+                match = False
+            if match:
+                matching_cal_ids.add(cid)
+        
+        if not matching_cal_ids:
+            filter_desc = []
+            if calendar_name: filter_desc.append(f"name='{calendar_name}'")
+            if calendar_id: filter_desc.append(f"id='{calendar_id}'")
+            if workweek_type: filter_desc.append(f"workweek='{workweek_type}'")
+            if semantic_tag: filter_desc.append(f"tag='{semantic_tag}'")
+            return {"success": False, "error": f"No calendars match the filter: {', '.join(filter_desc)}."}
+        
+        # Filter tasks
+        matched = tasks_df[tasks_df['clndr_id'].astype(str).isin(matching_cal_ids)]
+        hpd = source.get('hours_per_day', 8.0)
+        
+        results = []
+        for _, row in matched.head(limit).iterrows():
+            cid = str(row.get('clndr_id', ''))
+            cinfo = cal_map.get(cid, {})
+            float_hrs = float(row.get('total_float_hr_cnt', row.get('float_hrs', 0)) or 0)
+            results.append({
+                "task_id": row.get("task_id", ""),
+                "task_code": row.get("task_code", ""),
+                "task_name": row.get("task_name", ""),
+                "calendar_id": cid,
+                "calendar_name": cinfo.get("name", ""),
+                "workweek_type": cinfo.get("workweek_type", ""),
+                "hours_per_day": cinfo.get("hours_per_day"),
+                "semantic_tags": cinfo.get("semantic_tags", []),
+                "float_days": round(float_hrs / hpd, 1) if hpd else 0,
+                "start": str(row.get("target_start_date", ""))[:10],
+                "finish": str(row.get("target_end_date", ""))[:10],
+            })
+        
+        # Describe which calendars matched
+        matched_names = [cal_map[cid]["name"] for cid in matching_cal_ids if cid in cal_map]
+        
+        return {
+            "success": True,
+            "total_count": len(matched),
+            "displayed_count": len(results),
+            "is_truncated": len(matched) > limit,
+            "data": results,
+            "display_items": results,
+            "all_items": results,
+            "stats": {
+                "matched_calendars": matched_names,
+                "matched_calendar_count": len(matching_cal_ids),
+                "total_matching_activities": len(matched),
+            },
+            "template_type": "list"
+        }
+
 
     def get_critical_path_details(self, limit: int = 20, context: str = "audit") -> List[Dict]:
         """Returns structured info on the most critical tasks"""
@@ -1131,17 +1674,181 @@ class XERDataStore:
             # Group by task_id and sum costs
             # Common TASKRSRC cost fields: target_cost, act_reg_cost + act_ot_cost, remain_cost
             rsrc_costs = taskrsrc_df.copy()
-            for col in ['target_cost', 'act_reg_cost', 'act_ot_cost', 'remain_cost']:
+            for col in ['target_cost', 'act_reg_cost', 'act_ot_cost', 'remain_cost', 'target_qty', 'act_reg_qty', 'act_ot_qty']:
                 rsrc_costs[col] = pd.to_numeric(rsrc_costs.get(col, 0), errors='coerce').fillna(0)
             
             rsrc_costs['tot_act'] = rsrc_costs['act_reg_cost'] + rsrc_costs['act_ot_cost']
+            rsrc_costs['tot_act_qty'] = rsrc_costs['act_reg_qty'] + rsrc_costs['act_ot_qty']
             
             agg = rsrc_costs.groupby('task_id').agg({
                 'target_cost': 'sum',
                 'tot_act': 'sum',
-                'remain_cost': 'sum'
+                'remain_cost': 'sum',
+                'target_qty': 'sum',
+                'tot_act_qty': 'sum'
             })
             task_rsrc_costs = agg.to_dict('index')
+
+        # ── EVM: Compute Earned Value & Planned Value per activity ──
+        # EV Cost = Dynamically calculated using Performance % Complete * BAC (Implemented below)
+        # PV Cost = time-phased baseline budget at data date
+        #   - If baseline_finish <= data_date: PV = full budget  (work was planned to be done)
+        #   - If baseline_start > data_date:   PV = 0  (work wasn't planned to start yet)
+        #   - If baseline_start <= data_date < baseline_finish: PV = budget × elapsed fraction
+        task_ev_details = {}  # task_id -> dict with EV details
+        task_pv_costs = {}  # task_id -> PV cost
+        task_pv_labor = {}  # task_id -> PV labor
+
+        # PV requires baseline schedule dates + data date of the current schedule
+        data_date = pd.to_datetime(source.get('data_date'), errors='coerce')
+        baseline_src = self.get_baseline(context=context)
+        if baseline_src and 'df' in baseline_src and 'tasks' in baseline_src['df'] and data_date is not None:
+            # Load baseline calendars for accurate work-day distributions
+            bl_calendars_df = baseline_src['df'].get('calendar', baseline_src['df'].get('CALENDAR'))
+            bl_calendars_map = {}
+            if bl_calendars_df is not None and not bl_calendars_df.empty:
+                for _, row in bl_calendars_df.iterrows():
+                    bl_calendars_map[str(row.get('clndr_id'))] = P6Calendar(row.to_dict())
+            
+            bl_proj_clndr_id = str(baseline_src['df'].get('project', baseline_src['df'].get('PROJECT')).iloc[0].get('clndr_id', '')) if baseline_src['df'].get('project') is not None else ''
+            bl_default_cal = bl_calendars_map.get(bl_proj_clndr_id, P6Calendar())
+
+            bl_tasks = baseline_src['df']['tasks']
+            # Build baseline task_code -> (start, finish, calendar) map and task_code -> target_work_qty
+            bl_dates = {}
+            bl_labor = {}
+            for _, brow in bl_tasks.iterrows():
+                code = brow.get('task_code')
+                if not code:
+                    continue
+                bs = pd.to_datetime(brow.get('act_start_date') or brow.get('early_start_date') or brow.get('target_start_date'), errors='coerce')
+                bf = pd.to_datetime(brow.get('act_end_date') or brow.get('early_end_date') or brow.get('target_end_date'), errors='coerce')
+                clndr_id = str(brow.get('clndr_id', ''))
+                if pd.notnull(bs) and pd.notnull(bf):
+                    bl_dates[code] = (bs, bf, clndr_id)
+                    
+                target_work = pd.to_numeric(brow.get('target_work_qty', 0), errors='coerce')
+                bl_labor[code] = float(target_work) if pd.notnull(target_work) else 0.0
+
+            # Also build baseline TASKRSRC cost map (task_code -> budget)
+            bl_taskrsrc = baseline_src['df'].get('taskrsrc')
+            bl_rsrc_budget = {}
+            if bl_taskrsrc is not None and not bl_taskrsrc.empty:
+                bl_rc = bl_taskrsrc.copy()
+                bl_rc['target_cost'] = pd.to_numeric(bl_rc.get('target_cost', 0), errors='coerce').fillna(0)
+                bl_rsrc_agg = bl_rc.groupby('task_id')['target_cost'].sum()
+                bl_tid_to_code = bl_tasks.set_index('task_id')['task_code'].to_dict()
+                for btid, bcost in bl_rsrc_agg.items():
+                    bcode = bl_tid_to_code.get(btid)
+                    if bcode:
+                        bl_rsrc_budget[bcode] = float(bcost)
+
+            # Now compute PV for each current-schedule task
+            if tasks_df is not None:
+                cur_tid_to_code = tasks_df.set_index('task_id')['task_code'].to_dict()
+                code_to_cur_tid = {v: k for k, v in cur_tid_to_code.items()}
+                for code, (bs, bf, clndr_id) in bl_dates.items():
+                    cur_tid = code_to_cur_tid.get(code)
+                    if cur_tid is None:
+                        continue
+                    budget = bl_rsrc_budget.get(code, 0)
+                    labor_budget = bl_labor.get(code, 0)
+                    
+                    if budget <= 0 and labor_budget <= 0:
+                        continue
+                        
+                    if data_date >= bf:
+                        # Baseline says this should be done by now
+                        if budget > 0: task_pv_costs[cur_tid] = budget
+                        if labor_budget > 0: task_pv_labor[cur_tid] = labor_budget
+                    elif data_date <= bs:
+                        # Baseline says this shouldn't have started yet
+                        if budget > 0: task_pv_costs[cur_tid] = 0.0
+                        if labor_budget > 0: task_pv_labor[cur_tid] = 0.0
+                    else:
+                        # Partially elapsed — use P6 Calendar for accurate working days
+                        cal = bl_calendars_map.get(clndr_id, bl_default_cal)
+                        total_dur_days = cal.workdays_between(bs, bf)
+                        elapsed_days = cal.workdays_between(bs, data_date)
+                        planned_elapsed_pct = elapsed_days / total_dur_days if total_dur_days > 0 else 1.0
+                        
+                        if budget > 0: task_pv_costs[cur_tid] = budget * planned_elapsed_pct
+                        if labor_budget > 0: task_pv_labor[cur_tid] = labor_budget * planned_elapsed_pct
+                            
+            # Compute dynamic Earned Value (EV = BAC * Performance %)
+            if tasks_df is not None:
+                bac_map = bl_rsrc_budget if 'bl_rsrc_budget' in locals() else {}
+                for _, row in tasks_df.iterrows():
+                    tid = row['task_id']
+                    code = cur_tid_to_code.get(tid) if 'cur_tid_to_code' in locals() else row.get('task_code')
+                    
+                    # 1. Resolve BAC (Prefer Baseline. Fallback to Current Target Cost)
+                    bac = bac_map.get(code)
+                    if bac is None:
+                        bac = task_rsrc_costs.get(tid, {}).get('target_cost', 0.0)
+                        
+                    # 2. Extract Completion Metrics
+                    pct_type = row.get('complete_pct_type')
+                    status = row.get('status_code')
+                    selected_pct = 0.0
+                    
+                    if pct_type == 'CP_Phys':
+                        phys = pd.to_numeric(row.get('phys_complete_pct'), errors='coerce')
+                        selected_pct = phys / 100.0 if pd.notnull(phys) else 0.0
+                    elif pct_type == 'CP_Drtn':
+                        orig = pd.to_numeric(row.get('target_drtn_hr_cnt'), errors='coerce')
+                        rem = pd.to_numeric(row.get('remain_drtn_hr_cnt'), errors='coerce')
+                        if pd.notnull(orig) and orig > 0:
+                            dur_pct = (orig - (rem if pd.notnull(rem) else 0)) / orig
+                            selected_pct = max(0.0, min(1.0, dur_pct))
+                        elif status == 'TK_Complete':
+                            selected_pct = 1.0
+                    elif pct_type == 'CP_Units':
+                        t_qty = task_rsrc_costs.get(tid, {}).get('target_qty', 0)
+                        a_qty = task_rsrc_costs.get(tid, {}).get('tot_act_qty', 0)
+                        if t_qty > 0:
+                            selected_pct = a_qty / t_qty
+                        elif status == 'TK_Complete':
+                            selected_pct = 1.0
+                    else:
+                        selected_pct = 0.0
+                        
+                    ev_cost = float(bac) * float(selected_pct) if bac > 0 else 0.0
+                    
+                    target_work = pd.to_numeric(row.get('target_work_qty'), errors='coerce')
+                    target_work = float(target_work) if pd.notnull(target_work) else 0.0
+                    act_work = pd.to_numeric(row.get('act_work_qty'), errors='coerce')
+                    act_work = float(act_work) if pd.notnull(act_work) else 0.0
+                    
+                    ev_labor = target_work * float(selected_pct) if target_work > 0 else 0.0
+                    
+                    task_ev_details[tid] = {
+                        'ev_cost': ev_cost,
+                        'ev_method': pct_type if pd.notnull(pct_type) and str(pct_type).strip() != '' else 'Missing',
+                        'ev_percent': float(selected_pct * 100.0),
+                        'target_work_qty': target_work,
+                        'act_work_qty': act_work,
+                        'ev_labor': ev_labor
+                    }
+        
+        # Determine if Actual Cost is real or synthetic across the project
+        acts_with_ac = 0
+        exact_matches = 0
+        close_matches = 0
+        for tid, t in task_rsrc_costs.items():
+            ev = task_ev_details.get(tid, {}).get('ev_cost', 0)
+            ac = t.get('tot_act', 0)
+            if ac > 0:
+                acts_with_ac += 1
+                diff = abs(ev - ac)
+                if diff < 1.0: exact_matches += 1
+                elif (diff / max(ev, 1.0)) < 0.05: close_matches += 1
+                
+        ac_is_real = False
+        if acts_with_ac > 0:
+            match_rate = (exact_matches + close_matches) / acts_with_ac
+            if match_rate <= 0.90:
+                ac_is_real = True
         
         if wbs_df is None: return {"records": [], "total": 0}
         
@@ -1177,6 +1884,9 @@ class XERDataStore:
                     if filter_type == 'DELAYED': return (m.get('delay_days', 0) > 0) and status != 'COMPLETED'
                     if filter_type == 'DELAYED_CRITICAL': return m.get('delay_float_category') == 'DELAYED_CRITICAL'
                     if filter_type == 'DELAYED_NEGATIVE': return m.get('delay_float_category') == 'DELAYED_NEGATIVE'
+                    if filter_type == 'IN_PROGRESS': return status == 'IN_PROGRESS'
+                    if filter_type == 'COMPLETED': return status == 'COMPLETED'
+                    if filter_type == 'NOT_STARTED': return status == 'NOT_STARTED'
                     return True
                 
                 df = df[df['task_id'].apply(check_filter)]
@@ -1194,8 +1904,6 @@ class XERDataStore:
                 budget = pd.to_numeric(rec.get('target_cost') or rec.get('target_tot_cost') or rec.get('planned_tot_cost', 0), errors='coerce') or 0
                 actual = pd.to_numeric(rec.get('act_tot_cost') or rec.get('act_total_cost') or rec.get('actual_tot_cost', 0), errors='coerce') or 0
                 remain = pd.to_numeric(rec.get('remain_tot_cost') or rec.get('remaining_tot_cost') or rec.get('remain_total_cost', 0), errors='coerce') or 0
-                ev_cost = pd.to_numeric(rec.get('bcwp', 0), errors='coerce') or 0
-                pv_cost = pd.to_numeric(rec.get('bcws', 0), errors='coerce') or 0
                 
                 # Fallback to TaskRSRC aggregation if Task-level summary is 0
                 if budget == 0 and tid in task_rsrc_costs:
@@ -1204,6 +1912,18 @@ class XERDataStore:
                     actual = task_rsrc_costs[tid].get('tot_act', 0)
                 if remain == 0 and tid in task_rsrc_costs:
                     remain = task_rsrc_costs[tid].get('remain_cost', 0)
+
+                # EV & PV from pre-computed dynamic maps
+                ev_detail = task_ev_details.get(tid, {})
+                ev_cost = ev_detail.get('ev_cost', 0.0)
+                pv_cost = task_pv_costs.get(tid, 0)
+                ev_labor = ev_detail.get('ev_labor', 0.0)
+                pv_labor = task_pv_labor.get(tid, 0)
+                target_labor = ev_detail.get('target_work_qty', 0.0)
+                actual_labor = ev_detail.get('act_work_qty', 0.0)
+                
+                rec['ev_method'] = ev_detail.get('ev_method', 'Missing')
+                rec['ev_percent'] = ev_detail.get('ev_percent', 0.0)
 
                 bl_cost = baseline_cost_map.get(rec.get('task_code'), budget) # Fallback to budget if not in baseline
 
@@ -1214,11 +1934,25 @@ class XERDataStore:
                 rec['pv_cost'] = pv_cost
                 rec['bl_project_cost'] = bl_cost
                 rec['at_completion_cost'] = actual + remain
+                rec['target_labor'] = target_labor
+                rec['actual_labor'] = actual_labor
+                rec['ev_labor'] = ev_labor
+                rec['pv_labor'] = pv_labor
                 
                 # Ensure values are clean for JSON serialization
-                for k in ['budget_cost', 'actual_cost', 'remain_cost', 'ev_cost', 'pv_cost', 'bl_project_cost', 'at_completion_cost']:
+                for k in ['budget_cost', 'actual_cost', 'remain_cost', 'ev_cost', 'pv_cost', 'bl_project_cost', 'at_completion_cost', 'target_labor', 'actual_labor', 'ev_labor', 'pv_labor']:
                     if pd.isna(rec.get(k)): rec[k] = 0.0
                     else: rec[k] = float(rec[k])
+                
+                rec['cost_loaded'] = (rec['bl_project_cost'] > 0 or rec['budget_cost'] > 0)
+                rec['labor_loaded'] = (rec['target_labor'] > 0)
+                rec['sv_cost'] = rec['ev_cost'] - rec['pv_cost']
+                rec['cv_cost'] = rec['ev_cost'] - rec['actual_cost']
+                rec['spi'] = round(rec['ev_cost'] / rec['pv_cost'], 2) if rec['pv_cost'] > 0 else (1.0 if rec['ev_cost'] > 0 else None)
+                rec['cpi'] = round(rec['ev_cost'] / rec['actual_cost'], 2) if rec['actual_cost'] > 0 else (1.0 if rec['ev_cost'] > 0 else None)
+                
+                rec['sv_labor'] = rec['ev_labor'] - rec['pv_labor']
+                rec['spi_labor'] = round(rec['ev_labor'] / rec['pv_labor'], 2) if rec['pv_labor'] > 0 else (1.0 if rec['ev_labor'] > 0 else None)
 
                 # Float Processing - Prefer native P6 float if available (including 0)
                 has_native = False
@@ -1265,7 +1999,14 @@ class XERDataStore:
                     'early_finish': clean_rec.get('early_finish', ""),
                     'late_start': clean_rec.get('late_start', ""),
                     'late_finish': clean_rec.get('late_finish', ""),
-                    'baseline_finish': str(baseline_map.get(clean_rec.get('task_code', ''))) if clean_rec.get('task_code') in baseline_map else None,
+                    'baseline_finish': m.get('bl_finish_date'),
+                    'baseline_start': m.get('bl_start_date'),
+                    'forecast_slip_days': safe_float(m.get('forecast_slip_days', 0)),
+                    'threshold_days': safe_float(m.get('threshold_days', 0)),
+                    'classification': m.get('classification', 'ON_TRACK'),
+                    'bl_float_days': safe_float(m.get('bl_float_days', 0)),
+                    'float_consumed_pct': safe_float(m.get('float_consumed_pct', 0)),
+                    'float_risk': m.get('float_risk', 'Stable'),
                     'predecessors': source.get('dependency_graph', {}).get(tid, {}).get('predecessors', []),
                     'successors': source.get('dependency_graph', {}).get(tid, {}).get('successors', [])
                 }
@@ -1297,16 +2038,38 @@ class XERDataStore:
                     if not wid or wid == 'nan':
                         continue
                     m = activity_metrics_stubs.get(tid, {})
+                    # Pull real cost data
+                    rsrc_data = task_rsrc_costs.get(tid, {})
+                    rec_budget = pd.to_numeric(rec.get('target_cost') or rec.get('target_tot_cost') or rec.get('planned_tot_cost', 0), errors='coerce') or 0
+                    rec_actual = pd.to_numeric(rec.get('act_tot_cost') or rec.get('act_total_cost') or rec.get('actual_tot_cost', 0), errors='coerce') or 0
+                    rec_remain = pd.to_numeric(rec.get('remain_tot_cost') or rec.get('remaining_tot_cost') or rec.get('remain_total_cost', 0), errors='coerce') or 0
+                    
+                    stub_budget = rsrc_data.get('target_cost', 0) if rec_budget == 0 else rec_budget
+                    stub_actual = rsrc_data.get('tot_act', 0) if rec_actual == 0 else rec_actual
+                    stub_remain = rsrc_data.get('remain_cost', 0) if rec_remain == 0 else rec_remain
+                    stub_ev = task_ev_details.get(tid, {}).get('ev_cost', 0.0)
+                    stub_pv = task_pv_costs.get(tid, 0)
+                    stub_bl = baseline_cost_map.get(rec.get('task_code', ''), stub_budget)
+                    
+                    stub_target_labor = task_ev_details.get(tid, {}).get('target_work_qty', 0.0)
+                    stub_actual_labor = task_ev_details.get(tid, {}).get('act_work_qty', 0.0)
+                    stub_ev_labor = task_ev_details.get(tid, {}).get('ev_labor', 0.0)
+                    stub_pv_labor = task_pv_labor.get(tid, 0.0)
+
                     stub = {
                         'task_name': rec.get('task_name', ''),
                         'task_type': rec.get('task_type', ''),
                         'wbs_id': wid,
-                        'budget_cost': 0.0,
-                        'actual_cost': 0.0,
-                        'remain_cost': 0.0,
-                        'ev_cost': 0.0,
-                        'pv_cost': 0.0,
-                        'bl_project_cost': 0.0,
+                        'budget_cost': float(stub_budget),
+                        'actual_cost': float(stub_actual),
+                        'remain_cost': float(stub_remain),
+                        'ev_cost': float(stub_ev),
+                        'pv_cost': float(stub_pv),
+                        'bl_project_cost': float(stub_bl),
+                        'target_labor': float(stub_target_labor),
+                        'actual_labor': float(stub_actual_labor),
+                        'ev_labor': float(stub_ev_labor),
+                        'pv_labor': float(stub_pv_labor),
                         '_analysis': {
                             'status': m.get('status_enum', 'NOT_STARTED'),
                             'delay_days': float(m.get('delay_days') or 0),
@@ -1317,7 +2080,14 @@ class XERDataStore:
                             'early_finish': str(rec.get('early_finish', '') or ''),
                             'late_start': str(rec.get('late_start', '') or ''),
                             'late_finish': str(rec.get('late_finish', '') or ''),
-                            'baseline_finish': str(baseline_map.get(rec.get('task_code', ''))) if rec.get('task_code') in baseline_map else None,
+                            'baseline_finish': m.get('bl_finish_date'),
+                            'baseline_start': m.get('bl_start_date'),
+                            'forecast_slip_days': float(m.get('forecast_slip_days') or 0),
+                            'threshold_days': float(m.get('threshold_days') or 0),
+                            'classification': m.get('classification', 'ON_TRACK'),
+                            'bl_float_days': float(m.get('bl_float_days') or 0),
+                            'float_consumed_pct': float(m.get('float_consumed_pct') or 0),
+                            'float_risk': m.get('float_risk', 'Stable')
                         }
                     }
                     if wid not in analytics_stubs_by_wbs:
@@ -1420,29 +2190,30 @@ class XERDataStore:
                 "at_risk_delayed_pct": 0.10, "at_risk_critical_pct": 0.20,
             }
 
-        def _branch_status(activity_count, delayed_count, critical_count, completed_count, branch_variance_days):
+        def _branch_status(activity_count, delayed_count, at_risk_count, critical_count, completed_count, branch_variance_days):
             if activity_count == 0:
                 return "EMPTY"
                 
             # Completed branch logic
             if completed_count == activity_count:
                 if branch_variance_days <= 0:
-                    return "COMPLETED ON TIME"
+                    return "Performing"
                 else:
-                    return f"COMPLETED LATE (+{int(branch_variance_days)}d)"
+                    return "Slipping"
                     
             t = _thresholds
             d_pct = delayed_count / activity_count
+            ar_pct = at_risk_count / activity_count
             c_pct = critical_count / activity_count
             
             if d_pct > t["delayed_pct"]:
-                return "DELAYED"
+                return "Slipping"
             elif c_pct > t["critical_pct"]:
-                return "CRITICAL"
-            elif d_pct > t["at_risk_delayed_pct"] or c_pct > t["at_risk_critical_pct"]:
-                return "AT RISK"
+                return "Critical"
+            elif d_pct > t["at_risk_delayed_pct"] or ar_pct > t["at_risk_delayed_pct"] or c_pct > t["at_risk_critical_pct"]:
+                return "Watch"
             else:
-                return "ON TRACK"
+                return "Performing"
 
         # 6. Rollup stats (Dates, Durations, Float, Branch Analytics)
         def rollup_stats(node):
@@ -1453,22 +2224,47 @@ class XERDataStore:
             bl_finishes = []
             min_float = float('inf')
             
-            # Costs
+            # Costs & Totals
             budget_total = 0
             actual_total = 0
             remain_total = 0
             ev_total = 0
             pv_total = 0
             bl_project_total = 0
-
+            target_labor_total = 0.0
+            actual_labor_total = 0.0
+            ev_labor_total = 0.0
+            pv_labor_total = 0.0
+            
             # Branch Analytics
             activity_count = 0
             delayed_count = 0
-            critical_count = 0
+            completed_late_count = 0
             completed_count = 0
             total_delay_days = 0.0
             worst_delayed_activity = None
             worst_delay_days = 0.0
+            
+            # Old counts for branch health status tag (using existing thresholds)
+            old_at_risk_count = 0
+            old_critical_count = 0
+            
+            # B-039 counts
+            stable_count = 0
+            watching_count = 0
+            b039_at_risk_count = 0
+            b039_critical_count = 0
+            
+            # Coverage Trackers
+            has_ev_count = 0
+            has_pv_count = 0
+            has_ac_count = 0
+            ev_elig_count = 0
+            spi_active_bl_cost = 0.0
+            spi_active_count = 0
+            
+            spi_labor_active_count = 0
+            spi_labor_target_qty = 0.0
             
             # Activity Rollup — dates and costs
             # Use 'activities' (full records) when available (Activities tab).
@@ -1503,6 +2299,10 @@ class XERDataStore:
                 ev_total += act.get('ev_cost', 0)
                 pv_total += act.get('pv_cost', 0)
                 bl_project_total += act.get('bl_project_cost', 0)
+                target_labor_total += act.get('target_labor', 0.0)
+                actual_labor_total += act.get('actual_labor', 0.0)
+                ev_labor_total += act.get('ev_labor', 0.0)
+                pv_labor_total += act.get('pv_labor', 0.0)
 
             # Branch Analytics — uses '_analytics_activities' which is always populated
             # (stubs in WBS-only mode, same full records in Activities mode)
@@ -1510,23 +2310,70 @@ class XERDataStore:
                 analysis_data = act.get('_analysis', {})
                 task_type = act.get('task_type', '')
                 act_status = analysis_data.get('status', 'NOT_STARTED')
+                classification = analysis_data.get('classification', 'ON_TRACK')
+                float_risk = analysis_data.get('float_risk', 'Stable')
 
                 if task_type not in ('TT_WBS', 'TT_LOE'):
                     activity_count += 1
-                    delay = float(analysis_data.get('delay_days') or 0)
-                    is_critical = bool(analysis_data.get('is_critical', False))
                     
+                    if classification == 'DELAYED':
+                        delayed_count += 1
+                    elif classification == 'COMPLETED_LATE':
+                        completed_late_count += 1
+                        
                     if act_status == 'COMPLETED':
                         completed_count += 1
                         
+                    delay = float(analysis_data.get('delay_days') or 0)
+                    is_critical = bool(analysis_data.get('is_critical', False))
                     if delay > 0 and act_status != 'COMPLETED':
-                        delayed_count += 1
                         total_delay_days += delay
                         if delay > worst_delay_days:
                             worst_delay_days = delay
                             worst_delayed_activity = act.get('task_name', '')
+                    
+                    # Old counts for internal branch health thresholds
                     if is_critical and act_status != 'COMPLETED':
-                        critical_count += 1
+                        old_critical_count += 1
+                    
+                    forecast_slip = float(analysis_data.get('forecast_slip_days') or 0)
+                    threshold = float(analysis_data.get('threshold_days') or 5)
+                    if act_status != 'COMPLETED' and classification != 'DELAYED' and forecast_slip > threshold:
+                        old_at_risk_count += 1
+
+                    # B-039 counts
+                    if act_status != 'COMPLETED':
+                        if float_risk == 'Critical':
+                            b039_critical_count += 1
+                        elif float_risk == 'At Risk':
+                            b039_at_risk_count += 1
+                        elif float_risk == 'Watching':
+                            watching_count += 1
+                        else:
+                            stable_count += 1
+                    else:
+                        stable_count += 1 # Completed tasks are Stable
+
+                # Coverage tracking
+                bl_cost = float(act.get('bl_project_cost', 0) or 0)
+                budget = act.get('budget_cost', 0)
+                if bl_cost > 0 or budget > 0:
+                    ev_elig_count += 1
+                    has_ev = act.get('ev_cost', 0) > 0
+                    has_pv = act.get('pv_cost', 0) > 0
+                    if has_ev: has_ev_count += 1
+                    if has_pv: has_pv_count += 1
+                    if act.get('actual_cost', 0) > 0: has_ac_count += 1
+                    
+                    if has_ev or has_pv:
+                        spi_active_count += 1
+                        spi_active_bl_cost += bl_cost
+                        
+                    has_labor_ev = act.get('ev_labor', 0) > 0
+                    has_labor_pv = act.get('pv_labor', 0) > 0
+                    if has_labor_ev or has_labor_pv:
+                        spi_labor_active_count += 1
+                        spi_labor_target_qty += float(act.get('target_labor', 0.0))
 
             # Children Rollup
             for child in node.get('children', []):
@@ -1545,18 +2392,64 @@ class XERDataStore:
                 ev_total += child_stats.get('ev_cost', 0)
                 pv_total += child_stats.get('pv_cost', 0)
                 bl_project_total += child_stats.get('bl_project_cost', 0)
+                target_labor_total += child_stats.get('target_labor', 0.0)
+                actual_labor_total += child_stats.get('actual_labor', 0.0)
+                ev_labor_total += child_stats.get('ev_labor', 0.0)
+                pv_labor_total += child_stats.get('pv_labor', 0.0)
 
                 # Branch Analytics Rollup
                 activity_count += child_stats.get('activity_count', 0)
                 delayed_count += child_stats.get('delayed_count', 0)
-                critical_count += child_stats.get('critical_count', 0)
                 completed_count += child_stats.get('completed_count', 0)
+                completed_late_count += child_stats.get('completed_late_count', 0)
                 total_delay_days += child_stats.get('_total_delay_days_sum', 0.0) # Summed internally for average
+                
+                # Rollup old counts
+                old_at_risk_count += child_stats.get('_old_at_risk_count', 0)
+                old_critical_count += child_stats.get('_old_critical_count', 0)
+                
+                # Rollup B-039 counts
+                stable_count += child_stats.get('stable_count', 0)
+                watching_count += child_stats.get('watching_count', 0)
+                b039_at_risk_count += child_stats.get('at_risk_count', 0)
+                b039_critical_count += child_stats.get('critical_count', 0)
+
+                # Rollup coverage
+                has_ev_count += child_stats.get('has_ev_count', 0)
+                has_pv_count += child_stats.get('has_pv_count', 0)
+                has_ac_count += child_stats.get('has_ac_count', 0)
+                ev_elig_count += child_stats.get('ev_elig_count', 0)
+                spi_active_count += child_stats.get('spi_coverage_activity_count', 0)
+                spi_active_bl_cost += child_stats.get('spi_coverage_bl_cost', 0.0)
+                spi_labor_active_count += child_stats.get('spi_labor_coverage_activity_count', 0)
+                spi_labor_target_qty += child_stats.get('spi_labor_coverage_target_qty', 0.0)
                 
                 child_worst = child_stats.get('worst_delay_days', 0.0)
                 if child_worst > worst_delay_days:
                     worst_delay_days = child_worst
                     worst_delayed_activity = child_stats.get('worst_delayed_activity')
+
+            # B-039 WBS level float risk rollup logic
+            total_active = stable_count + watching_count + b039_at_risk_count + b039_critical_count
+            if total_active > 0:
+                critical_pct = round(b039_critical_count / total_active * 100, 1)
+                at_risk_pct = round(b039_at_risk_count / total_active * 100, 1)
+                watching_pct = round(watching_count / total_active * 100, 1)
+                stable_pct = round(stable_count / total_active * 100, 1)
+            else:
+                critical_pct = 0.0
+                at_risk_pct = 0.0
+                watching_pct = 0.0
+                stable_pct = 0.0
+
+            if critical_pct > 50.0:
+                float_risk = "Critical"
+            elif at_risk_pct > 20.0:
+                float_risk = "At Risk"
+            elif watching_pct > 20.0:
+                float_risk = "Watching"
+            else:
+                float_risk = "Stable"
 
             # Calculate Summary Dates
             s = min(starts) if starts else None
@@ -1596,7 +2489,7 @@ class XERDataStore:
 
             # Criticality tag — always valid, even in baseline-only mode
             # Describes schedule structure/sensitivity, NOT delay performance
-            crit_pct = critical_count / activity_count if activity_count > 0 else 0
+            crit_pct = b039_critical_count / activity_count if activity_count > 0 else 0
             if crit_pct >= 0.60:
                 criticality_tag = 'HIGH CRITICALITY'    # PLACEHOLDER threshold — confirm with planner
             elif crit_pct >= 0.30:
@@ -1606,6 +2499,43 @@ class XERDataStore:
             else:
                 criticality_tag = 'NOT CRITICAL'
 
+            # ── EVM Aggregated Metrics ──
+            # SPI = ΣEV / ΣPV  (aggregated correctly, NOT averaged)
+            spi = None
+            if pv_total > 0:
+                spi = round(ev_total / pv_total, 2)
+            
+            # CPI and CV (only valid if Actual Cost is actively tracked)
+            cpi = None
+            cv_cost = None
+            if ac_is_real:
+                if actual_total > 0:
+                    cpi = round(ev_total / actual_total, 2)
+                cv_cost = round(ev_total - actual_total, 2)
+                
+            # Schedule Variance = EV - PV (in cost units, converted to a status)
+            sv_cost = ev_total - pv_total
+
+            # EVM-based status (supplements the existing delay-based status)
+            evm_status = None
+            if spi is not None:
+                if spi >= 0.95:
+                    evm_status = 'ON TRACK'
+                elif spi >= 0.85:
+                    evm_status = 'NEAR TRACK'
+                else:
+                    evm_status = 'BEHIND'
+
+            # Calculate SPI value coverage pct
+            spi_coverage_pct = round((spi_active_bl_cost / bl_project_total * 100), 1) if bl_project_total > 0 else 0.0
+            
+            sv_labor = ev_labor_total - pv_labor_total
+            spi_labor = round(ev_labor_total / pv_labor_total, 2) if pv_labor_total > 0 else (1.0 if ev_labor_total > 0 else None)
+            spi_labor_coverage_pct = round((spi_labor_target_qty / target_labor_total * 100), 1) if target_labor_total > 0 else 0.0
+            
+            spi_labor_display = f"{spi_labor:.2f}" if spi_labor is not None else "-"
+            spi_labor_coverage_label = f"SPI Labor {spi_labor_display}\n(covers {spi_labor_coverage_pct:g}% of branch labor units, {spi_labor_active_count} of {activity_count} activities)" if spi_labor_active_count > 0 else "No SPI Labor data"
+            
             node['summary'] = {
                 'early_start': str(s.date()) if s else None,
                 'early_finish': str(f.date()) if f else None,
@@ -1620,10 +2550,45 @@ class XERDataStore:
                 'pv_cost': pv_total,
                 'bl_project_cost': bl_project_total,
                 'at_completion_cost': actual_total + remain_total,
+                # EVM metrics
+                'spi': spi,
+                'cpi': cpi,
+                'sv_cost': round(sv_cost, 2),
+                'cv_cost': cv_cost,
+                'spi_coverage_pct': spi_coverage_pct,
+                'spi_coverage_activity_count': spi_active_count,
+                'spi_coverage_total_activity_count': activity_count,
+                'spi_coverage_bl_cost': spi_active_bl_cost,
+                'spi_coverage_label': f"Coverage: {spi_coverage_pct:g}% of branch baseline cost ({spi_active_count} of {activity_count} activities)" if spi_active_count > 0 else "No SPI data",
+                
+                # Labor EVM Metrics
+                'target_labor': target_labor_total,
+                'actual_labor': actual_labor_total,
+                'ev_labor': ev_labor_total,
+                'pv_labor': pv_labor_total,
+                'sv_labor': round(sv_labor, 2),
+                'spi_labor': spi_labor,
+                'spi_labor_coverage_pct': spi_labor_coverage_pct,
+                'spi_labor_coverage_activity_count': spi_labor_active_count,
+                'spi_labor_coverage_target_qty': spi_labor_target_qty,
+                'spi_labor_coverage_label': spi_labor_coverage_label,
+                'ev_coverage_label': f"based on {has_ev_count} of {activity_count} activities with valid EV",
+                'pv_coverage_label': f"based on {has_pv_count} of {activity_count} activities with valid PV",
+                'ac_coverage_label': f"based on {has_ac_count} of {activity_count} activities with valid AC" if ac_is_real else "AC not tracked",
+                'cpi_coverage_label': f"CPI {cpi:.2f} based on {has_ac_count}/{activity_count} activities with valid EV/AC" if cpi is not None else ("Cannot compute CPI because Actual Cost is not tracked separately on this project." if not ac_is_real else "No CPI data"),
+                'has_ev_count': has_ev_count,
+                'has_pv_count': has_pv_count,
+                'has_ac_count': has_ac_count,
+                'ev_elig_count': ev_elig_count,
+                'evm_status': evm_status,
                 # Branch analytics
                 'activity_count': activity_count,
                 'delayed_count': delayed_count,
-                'critical_count': critical_count,
+                'at_risk_count': b039_at_risk_count,
+                'watching_count': watching_count,
+                'stable_count': stable_count,
+                'completed_late_count': completed_late_count,
+                'critical_count': b039_critical_count,
                 'completed_count': completed_count,
                 'critical_pct': round(crit_pct * 100, 1),
                 'branch_variance_days': round(branch_variance_days, 1),
@@ -1631,11 +2596,21 @@ class XERDataStore:
                 'worst_delay_days': round(worst_delay_days, 1),
                 'avg_delay_days': round(avg_delay_days, 1),
                 '_total_delay_days_sum': total_delay_days,
+                '_old_at_risk_count': old_at_risk_count,
+                '_old_critical_count': old_critical_count,
                 'baseline_finish': str(bl_f_date.date()) if bl_f_date else None,
                 # Performance tag (only meaningful when update schedule is loaded)
-                'status_tag': _branch_status(activity_count, delayed_count, critical_count, completed_count, branch_variance_days),
+                'status_tag': _branch_status(activity_count, delayed_count, old_at_risk_count, old_critical_count, completed_count, branch_variance_days),
                 # Structure tag (always valid — describes critical path density)
                 'criticality_tag': criticality_tag,
+                # B-039 Branch Float Risk
+                'baseline_float': None,
+                'float_consumed_pct': None,
+                'float_risk': float_risk,
+                'stable_pct': stable_pct,
+                'watching_pct': watching_pct,
+                'at_risk_pct': at_risk_pct,
+                'critical_pct': critical_pct,
             }
             return node['summary']
 
@@ -1657,6 +2632,12 @@ class XERDataStore:
         }
 
     def get_table_data(self, table_type: str = "TASK", search: str = "", limit: int = 100, offset: int = 0, source_id: Optional[str] = None, filter_type: str = "ALL", context: str = "audit") -> Dict:
+        """Fetch and format paginated table data from a specific version ID"""
+        source = self.get_version(source_id, context=context)
+        
+        # B-040: Validation block removed.
+        # We now intercept mismatches statelessly during file upload instead.
+
         if table_type == "HIERARCHY":
             return self.get_wbs_hierarchy(source_id, search, filter_type, include_activities=True, context=context)
         elif table_type == "WBS_HIERARCHY":
@@ -1702,10 +2683,16 @@ class XERDataStore:
                 if filter_type == 'CRITICAL': return m.get('is_critical_p6', False)
                 if filter_type == 'NEG_FLOAT': return (m.get('float_hrs', 0) < 0)
                 if filter_type == 'DELAYED': 
-                    # For total 'Delayed' view, focus on active incomplete delays
-                    return (m.get('delay_days', 0) > 0) and status != 'COMPLETED'
+                    return m.get('classification') == 'DELAYED'
+                if filter_type == 'AT_RISK': 
+                    return m.get('classification') == 'AT_RISK'
+                if filter_type in ['WATCHING', 'WATCH']: 
+                    return m.get('classification') == 'WATCHING'
                 if filter_type == 'DELAYED_CRITICAL': return m.get('delay_float_category') == 'DELAYED_CRITICAL'
                 if filter_type == 'DELAYED_NEGATIVE': return m.get('delay_float_category') == 'DELAYED_NEGATIVE'
+                if filter_type == 'IN_PROGRESS': return status == 'IN_PROGRESS'
+                if filter_type == 'COMPLETED': return status == 'COMPLETED'
+                if filter_type == 'NOT_STARTED': return status == 'NOT_STARTED'
                 return True
             
             df = df[df['task_id'].apply(check_filter)]
@@ -1740,12 +2727,19 @@ class XERDataStore:
         if df_key == 'tasks':
             analysis = self.get_deterministic_analysis(source_id, context=context)
             activity_metrics = analysis.get('activityAnalysis', {})
+            cal_map = self.get_calendar_map(version_id=source_id, context=context)
             
             records = []
             hpd = source.get('hours_per_day', 8.0)
             for rec in paginated_df.to_dict('records'):
                 tid = rec.get('task_id')
                 metrics = activity_metrics.get(tid, {})
+                cal_id = str(rec.get('clndr_id', ''))
+                cal_info = cal_map.get(cal_id, {})
+                
+                rec['float_risk'] = metrics.get('float_risk', 'Stable')
+                rec['bl_float_days'] = float(metrics.get('bl_float_days') or 0.0)
+                rec['float_consumed_pct'] = float(metrics.get('float_consumed_pct') or 0.0)
                 rec['duration_days'] = round(pd.to_numeric(rec.get('target_drtn_hr_cnt', 0), errors='coerce') / hpd, 1)
                 rec['_analysis'] = {
                     'status': metrics.get('status_enum', 'NOT_STARTED'),
@@ -1758,9 +2752,18 @@ class XERDataStore:
                     'late_start': rec.get('late_start'),
                     'late_finish': rec.get('late_finish'),
                     'total_float': rec.get('total_float'),
+                    'baseline_finish': metrics.get('bl_finish_date'),
+                    'baseline_start': metrics.get('bl_start_date'),
+                    'forecast_slip_days': float(metrics.get('forecast_slip_days') or 0),
+                    'threshold_days': float(metrics.get('threshold_days') or 0),
+                    'classification': metrics.get('classification', 'ON_TRACK'),
+                    'bl_float_days': float(metrics.get('bl_float_days') or 0),
+                    'float_consumed_pct': float(metrics.get('float_consumed_pct') or 0),
+                    'float_risk': metrics.get('float_risk', 'Stable'),
                     'predecessors': source.get('dependency_graph', {}).get(tid, {}).get('predecessors', []),
                     'successors': source.get('dependency_graph', {}).get(tid, {}).get('successors', []),
-                    'activity_codes': metrics.get('activity_codes', {})
+                    'activity_codes': metrics.get('activity_codes', {}),
+                    'calendar': cal_info
                 }
                 records.append(rec)
             return {
@@ -1775,6 +2778,249 @@ class XERDataStore:
             "total": total,
             "table": table_type
         }
+    # ── B-042: Dashboard Aggregation ─────────────────────────────────────────
+    def get_dashboard_data(self, context: str = "controller") -> Dict:
+        """B-042: Aggregate all KPI data for the dashboard.
+        Pure presentation layer — reuses B-034/035/036 engines."""
+        try:
+            ctx = self.contexts.get(context, self.contexts.get("audit", {}))
+            versions = ctx.get("versions", {})
+            baselines = [v for v in versions.values() if v["type"] == "baseline"]
+            updates = [v for v in versions.values() if v["type"] == "update"]
+
+            # ── Mode check ──
+            if not baselines:
+                return {"mode": "NO_DATA", "error": "No schedule data loaded."}
+
+            if not updates:
+                return {"mode": "BASELINE_ONLY", "error": "This dashboard requires an update file. Current mode: Baseline only."}
+
+            # ── Gather sources ──
+            baseline = self.get_baseline(context=context)
+            latest = self.get_latest(context=context)
+            if not baseline or not latest or baseline["id"] == latest["id"]:
+                return {"mode": "BASELINE_ONLY", "error": "This dashboard requires an update file. Current mode: Baseline only."}
+
+            # ── Dates ──
+            bl_stats = self.compute_basic_stats(version_id=baseline["id"], context=context)
+            up_stats = self.compute_basic_stats(version_id=latest["id"], context=context)
+            baseline_finish = bl_stats.get("project_finish")
+            forecast_finish = up_stats.get("project_finish")
+
+            # ── Delay ──
+            delay_info = self.calculate_project_delay(context=context)
+            delay_days = delay_info.get("delay_days")
+
+            # ── Deterministic analysis (update) ──
+            analysis = self.get_deterministic_analysis(latest["id"], context=context)
+            summary = analysis.get("projectSummary", {})
+            health = summary.get("healthMetrics", {})
+            activity_data = analysis.get("activityAnalysis", {})
+
+            # ── Critical Path extraction ──
+            longest_path_activities = []
+            next_path_activities = []
+            hpd = self.hours_per_day or 8.0
+
+            for tid, m in activity_data.items():
+                fh = m.get("float_hrs", 0) or 0
+                fd = fh / hpd
+                path_id = m.get("path_id", None)
+                
+                # Default sorting date is very high if missing to keep them at the end
+                sort_start_val = pd.Timestamp.max
+                sort_end_val = pd.Timestamp.max
+                dt_start = m.get("_dt_current_start_date")
+                dt_end = m.get("_dt_current_end_date")
+                if pd.notnull(dt_start):
+                    sort_start_val = pd.to_datetime(dt_start)
+                if pd.notnull(dt_end):
+                    sort_end_val = pd.to_datetime(dt_end)
+                    
+                entry = {
+                    "task_code": m.get("task_code", ""),
+                    "task_name": m.get("task_name", ""),
+                    "float_days": round(fd, 1),
+                    "status": m.get("status_enum", ""),
+                    "start_date": sort_start_val,
+                    "end_date": sort_end_val
+                }
+                
+                if path_id == 1:
+                    longest_path_activities.append(entry)
+                elif path_id == 2:
+                    next_path_activities.append(entry)
+
+            # Sort longest path chronologically by Early Start
+            longest_path_activities.sort(key=lambda x: x["start_date"])
+            
+            # Sort next path chronologically by Early Start
+            next_path_activities.sort(key=lambda x: x["start_date"])
+            
+            # Path Duration Calculation (Calendar Days between first start and last end)
+            def calc_path_duration(path_list):
+                if not path_list: return None
+                start = path_list[0]["start_date"]
+                end = path_list[-1]["end_date"]
+                if start == pd.Timestamp.max or end == pd.Timestamp.max: return None
+                return (end - start).days
+
+            p1_dur = calc_path_duration(longest_path_activities)
+            p2_dur = calc_path_duration(next_path_activities)
+
+            # Find worst float in each path
+            p1_worst_float = min([a["float_days"] for a in longest_path_activities]) if longest_path_activities else None
+            p2_worst_float = min([a["float_days"] for a in next_path_activities]) if next_path_activities else None
+
+            current_cp = {
+                "count": len(longest_path_activities),
+                "worst_float": p1_worst_float,
+                "duration": p1_dur,
+                "first_activity": longest_path_activities[0]["task_name"] if longest_path_activities else None,
+                "first_activity_id": longest_path_activities[0]["task_code"] if longest_path_activities else None,
+                "last_activity": longest_path_activities[-1]["task_name"] if longest_path_activities else None,
+                "last_activity_id": longest_path_activities[-1]["task_code"] if longest_path_activities else None,
+            }
+
+            next_cp = {
+                "count": len(next_path_activities),
+                "min_float": p2_worst_float,
+                "duration": p2_dur,
+                "first_activity": next_path_activities[0]["task_name"] if next_path_activities else None,
+                "first_activity_id": next_path_activities[0]["task_code"] if next_path_activities else None,
+                "last_activity": next_path_activities[-1]["task_name"] if next_path_activities else None,
+                "last_activity_id": next_path_activities[-1]["task_code"] if next_path_activities else None,
+            }
+
+            # ── EVM from root WBS summary (B-034/035/036) ──
+            wbs_tree = self.get_wbs_hierarchy(latest["id"], context=context)
+            bl_wbs_tree = self.get_wbs_hierarchy(baseline["id"], context=context)
+
+            # Extract root-level EVM from update WBS
+            root_summary = {}
+            wbs_delay_list = []
+
+            def extract_root_evm(nodes):
+                """Walk tree, collecting Level-2 WBS summaries (children of root)."""
+                for node in nodes:
+                    s = node.get("summary", {})
+                    if s and node.get("children"):
+                        # This is a branch with children = a WBS grouping node
+                        extract_root_evm(node["children"])
+                    elif s:
+                        # Leaf WBS with activities — collect
+                        pass
+
+            # Simpler: get the root node's aggregated summary
+            if wbs_tree.get("records"):
+                root = wbs_tree["records"][0] if wbs_tree["records"] else {}
+                root_summary = root.get("summary", {})
+
+                # Per-WBS delay: compare each level-2 WBS finish date
+                bl_wbs_map = {}
+                def map_bl_wbs(nodes):
+                    for n in nodes:
+                        s = n.get("summary", {})
+                        if s and s.get("early_finish"):
+                            bl_wbs_map[n.get("wbs_name", "")] = s.get("early_finish")
+                        if n.get("children"):
+                            map_bl_wbs(n["children"])
+
+                if bl_wbs_tree.get("records"):
+                    map_bl_wbs(bl_wbs_tree["records"])
+
+                def collect_wbs_delay(nodes, depth=0):
+                    for n in nodes:
+                        s = n.get("summary", {})
+                        name = n.get("wbs_name", "")
+                        wbs_id = n.get("wbs_id", "")
+                        up_finish = s.get("early_finish")
+                        bl_finish = bl_wbs_map.get(name)
+
+                        if up_finish and bl_finish and depth >= 1:
+                            try:
+                                up_dt = pd.to_datetime(up_finish)
+                                bl_dt = pd.to_datetime(bl_finish)
+                                d = (up_dt - bl_dt).days
+                                act_count = s.get("activity_count", 0)
+                                
+                                if act_count and act_count > 0:
+                                    status = "On Track"
+                                    if d > 0: status = "Behind Schedule"
+                                    elif d < 0: status = "Ahead of Schedule"
+
+                                    pct_complete = 0.0
+                                    budget = s.get("budget_cost", 0)
+                                    ev = s.get("ev_cost", 0)
+                                    if budget > 0:
+                                        pct_complete = round((ev / budget) * 100, 1)
+                                    else:
+                                        comp = s.get("completed_count", 0)
+                                        pct_complete = round((comp / act_count) * 100, 1)
+
+                                    wbs_delay_list.append({
+                                        "wbs": name,
+                                        "wbs_id": wbs_id,
+                                        "delay": d,
+                                        "activity_count": act_count,
+                                        "bl_finish": bl_finish,
+                                        "up_finish": up_finish,
+                                        "status": status,
+                                        "pct_complete": pct_complete
+                                    })
+                            except:
+                                pass
+                        if n.get("children"):
+                            collect_wbs_delay(n["children"], depth + 1)
+
+                collect_wbs_delay(wbs_tree["records"])
+
+            wbs_delay_list.sort(key=lambda x: x["delay"], reverse=True)
+            wbs_delay_list = wbs_delay_list[:15]
+
+            # EVM values from root summary
+            spi = root_summary.get("spi")
+            cpi = root_summary.get("cpi")
+            spi_coverage = root_summary.get("spi_coverage_pct")
+            cpi_coverage = None
+            if root_summary.get("has_ac_count") and root_summary.get("activity_count"):
+                cpi_coverage = round(root_summary["has_ac_count"] / root_summary["activity_count"] * 100, 1)
+
+            cost_sv = root_summary.get("sv_cost")
+            pv_cost = root_summary.get("pv_cost")
+            ev_cost = root_summary.get("ev_cost")
+
+            # Physical SV: physical progress vs planned progress
+            # If SPI exists, physical_sv ≈ (SPI - 1) * 100
+            physical_sv = round((spi - 1) * 100, 1) if spi is not None else None
+
+            return {
+                "mode": "WITH_UPDATE",
+                "forecast_finish": forecast_finish,
+                "baseline_finish": baseline_finish,
+                "delay_days": delay_days,
+                "cost_sv": round(cost_sv, 2) if cost_sv is not None else None,
+                "physical_sv": physical_sv,
+                "pv_cost": round(pv_cost, 2) if pv_cost is not None else None,
+                "ev_cost": round(ev_cost, 2) if ev_cost is not None else None,
+                "spi": spi,
+                "spi_coverage": spi_coverage,
+                "cpi": cpi,
+                "cpi_coverage": cpi_coverage,
+                "current_critical_path": current_cp,
+                "next_critical_path": next_cp,
+                "wbs_delay": wbs_delay_list,
+                "health_score": health.get("projectHealthScore"),
+                "health_status": health.get("healthStatus"),
+                "total_activities": up_stats.get("total_activities"),
+                "critical_count": health.get("criticalCount"),
+            }
+        except Exception as e:
+            print(f"[B-042] Dashboard error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"mode": "ERROR", "error": str(e)}
+
     def store_result(self, data: List[Dict]) -> str:
         import uuid
         ref_id = str(uuid.uuid4())

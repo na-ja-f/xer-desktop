@@ -1,0 +1,35 @@
+
+--- TASK TABLE FIELDS ---
+TASK.act_equip_qty: ['0' '60.75']
+TASK.act_this_per_equip_qty: ['0' '60.75']
+TASK.act_this_per_work_qty: ['0' '187.479246743248' '87.3704654000726' '893.283469498911'
+ '271.984817578773']
+TASK.act_work_qty: ['0' '187.479246743248' '87.3704654000726' '893.283469498911'
+ '271.984817578773']
+TASK.complete_pct_type: ['CP_Drtn' 'CP_Phys']
+TASK.phys_complete_pct: ['0' '100' '68' '65' '62']
+TASK.remain_drtn_hr_cnt: ['0' '280' '270' '140' '14']
+TASK.remain_equip_qty: ['0' '1792' '448' '537.6' '385.714285714286']
+TASK.remain_work_qty: ['0' '6272' '9856' '3584' '10808']
+TASK.target_drtn_hr_cnt: ['0' '280' '270' '140' '112']
+TASK.target_equip_qty: ['0' '1792' '448' '537.6' '385.714285714286']
+TASK.target_work_qty: ['0' '6272' '9856' '3584' '10808']
+
+--- TASKRSRC TABLE FIELDS ---
+TASKRSRC.act_ot_cost: ['0.0000']
+TASKRSRC.act_ot_qty: ['0']
+TASKRSRC.act_reg_cost: ['0.0000' '3197988.0000' '386266.0000' '153125.0000' '10489093.0000']
+TASKRSRC.act_reg_qty: ['0' '187.479246743248' '87.3704654000726' '893.283469498911'
+ '271.984817578773']
+TASKRSRC.act_this_per_cost: ['0.0000' '3197988.0000' '386266.0000' '153125.0000' '10489093.0000']
+TASKRSRC.act_this_per_qty: ['0' '187.479246743248' '87.3704654000726' '893.283469498911'
+ '271.984817578773']
+TASKRSRC.cost_per_qty: ['' '1.0000' '0.0000']
+TASKRSRC.cost_per_qty_source_type: ['ST_Rsrc']
+TASKRSRC.cost_qty_link_flag: ['Y' 'N']
+TASKRSRC.remain_cost: ['1535748.8300' '0.0000' '2047665.1100' '67494.5500' '463264.3500']
+TASKRSRC.remain_qty: ['1535748.83' '1344' '224' '3584' '1792']
+TASKRSRC.remain_qty_per_hr: ['5484.81725' '4.8' '0.8' '12.8' '6.4']
+TASKRSRC.target_cost: ['1535748.8300' '0.0000' '2047665.1100' '67494.5500' '463264.3500']
+TASKRSRC.target_qty: ['1535748.83' '1344' '224' '3584' '1792']
+TASKRSRC.target_qty_per_hr: ['5484.81725' '4.8' '0.8' '12.8' '6.4']

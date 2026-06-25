@@ -36,6 +36,7 @@ class P6Calendar:
     def __init__(self, clndr_row: Optional[Dict] = None):
         self.work_days: Set[int] = {0, 1, 2, 3, 4}  # Mon-Fri default (weekday() 0-4)
         self.holidays: Set[date] = set()
+        self.working_exceptions: Set[date] = set()
         self.hours_per_day: float = 8.0
 
         if clndr_row:
@@ -57,7 +58,7 @@ class P6Calendar:
             self.work_days = work_days_set
 
         # Exceptions (holidays) — P6 encodes them inside clndr_data too
-        self.holidays = self._parse_exceptions(clndr_data)
+        self._parse_exceptions(clndr_data)
 
     def _parse_weekly_pattern(self, clndr_data: str) -> Optional[Set[int]]:
         """
@@ -101,20 +102,48 @@ class P6Calendar:
                     work_days.add(p6_to_python[p6_day])
             return work_days if work_days else None
 
-    def _parse_exceptions(self, clndr_data: str) -> Set[date]:
-        """Parse holiday exceptions from clndr_data."""
-        holidays = set()
-        # Exception blocks look like: e(20240101|0|0|...) or similar
+    def _parse_exceptions(self, clndr_data: str):
+        """Parse holiday and working exceptions from clndr_data."""
+        # 1. Legacy format
         matches = re.findall(r'e\((\d{8})', clndr_data)
         for m in matches:
             try:
-                holidays.add(datetime.strptime(m, '%Y%m%d').date())
+                self.holidays.add(datetime.strptime(m, '%Y%m%d').date())
             except Exception:
                 pass
-        return holidays
+                
+        # 2. Modern format (d|XXXXX)
+        # P6 epoch for (d|XXXX) is Excel epoch base: Dec 30, 1899
+        matches = re.finditer(r'\(d\|(\d+)\)', clndr_data)
+        for m in matches:
+            try:
+                days = int(m.group(1))
+                dt = (datetime(1899, 12, 30) + timedelta(days=days)).date()
+                
+                # B-041: Ignore P6 internal workweek anchor dates (typically year 2001)
+                if dt.year <= 2005:
+                    continue
+                
+                # Check for shifts within the exception block
+                block = clndr_data[m.end(): m.end() + 200]
+                # A block belongs to this date until it hits the next '(d|' or end
+                end_block = block.find('(d|')
+                if end_block != -1:
+                    block = block[:end_block]
+                
+                if 's|' in block:
+                    # Contains shift (working exception)
+                    self.working_exceptions.add(dt)
+                else:
+                    # Empty shifts -> non-working exception (holiday)
+                    self.holidays.add(dt)
+            except Exception:
+                pass
 
     def is_workday(self, dt: datetime) -> bool:
         d = dt.date() if isinstance(dt, datetime) else dt
+        if d in self.working_exceptions:
+            return True
         if d in self.holidays:
             return False
         return dt.weekday() in self.work_days
@@ -155,6 +184,55 @@ class P6Calendar:
                 days += 1
             current += timedelta(days=1)
         return float(days)
+
+    # ------------------------------------------------------------------
+    # Calendar Metadata Helpers (B-041)
+    # ------------------------------------------------------------------
+
+    _WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+    def get_working_day_names(self) -> List[str]:
+        """Return ordered list of working day names, e.g. ['Mon', 'Tue', ...]."""
+        return [self._WEEKDAY_NAMES[d] for d in sorted(self.work_days)]
+        
+    def get_workweek_pattern(self) -> Dict[str, bool]:
+        """Return a full 7-day mapping of working status."""
+        return {day: (i in self.work_days) for i, day in enumerate(self._WEEKDAY_NAMES)}
+
+    def get_workweek_type(self) -> str:
+        """Return human-readable workweek label: '5-day calendar', '6-day calendar', etc."""
+        n = len(self.work_days)
+        return f"{n}-day calendar"
+
+    def get_holiday_dates(self) -> List[str]:
+        """Return sorted ISO-formatted holiday (non-working exception) dates."""
+        return sorted(d.isoformat() for d in self.holidays)
+
+    def get_working_exception_dates(self) -> List[str]:
+        """Return sorted ISO-formatted working exception dates."""
+        return sorted(d.isoformat() for d in self.working_exceptions)
+
+    @staticmethod
+    def detect_semantic_tags(calendar_name: str) -> List[str]:
+        """Auto-detect semantic tags from calendar name.
+        Examples:
+            'Ramadan Calendar'      → ['RAMADAN']
+            'Night Shift Calendar'  → ['NIGHT_SHIFT']
+            'Summer Working Hours'  → ['SUMMER']
+        """
+        if not calendar_name:
+            return []
+        name_lower = calendar_name.lower()
+        tags = []
+        if 'ramadan' in name_lower:
+            tags.append('RAMADAN')
+        if 'summer' in name_lower:
+            tags.append('SUMMER')
+        if 'night' in name_lower and 'shift' in name_lower:
+            tags.append('NIGHT_SHIFT')
+        elif 'shift' in name_lower:
+            tags.append('SHIFT')
+        return tags
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +621,85 @@ class CPMScheduler:
                 cal = self._get_calendar(cal_map, cal_id_map[tid])
                 LS[tid] = self._subtract_duration(LF[tid], dur[tid], cal)
 
+        # ---- Calculate Float ----
+        final_tf_map = {}
+        for tid in task_ids:
+            es = ES[tid]
+            ls = LS.get(tid, LF.get(tid))
+            cal = self._get_calendar(cal_map, cal_id_map[tid])
+            tf_days = self._working_days_diff(es, ls, cal)
+            final_tf = 0.0
+            if not pd.isna(tf_days):
+                final_tf = round(float(tf_days), 2)
+            final_tf_map[tid] = final_tf
+
+        # ---- Multiple Float Path Trace ----
+        path_ids = {tid: None for tid in task_ids}
+        if task_ids and EF:
+            max_ef_val = max(EF.values())
+            
+            # --- Path 1: Longest Path ---
+            # Start trace from activities defining the project end date
+            path1_terminals = [tid for tid in task_ids if EF[tid] == max_ef_val]
+            
+            visited_p1 = set()
+            queue_p1 = path1_terminals.copy()
+            
+            while queue_p1:
+                curr_id = queue_p1.pop(0)
+                if curr_id in visited_p1:
+                    continue
+                visited_p1.add(curr_id)
+                path_ids[curr_id] = 1
+                
+                curr_es = ES[curr_id]
+                
+                for pid, rtype, lag in predecessors[curr_id]:
+                    candidate_es = self._forward_constraint(
+                        rtype, lag, ES[pid], EF[pid], dur[curr_id], cal_map, cal_id_map[curr_id]
+                    )
+                    # A predecessor is driving if its forward constraint exactly dictates the successor's Early Start
+                    if abs((candidate_es - curr_es).total_seconds()) < 3600:  # Within 1 hour tolerance
+                        if pid not in visited_p1:
+                            queue_p1.append(pid)
+
+            # --- Path 2: Next Critical Path ---
+            # Find the activity with the lowest total float that is NOT on Path 1
+            min_float_p2 = float('inf')
+            path2_seed = None
+            
+            for tid in task_ids:
+                if path_ids[tid] != 1:
+                    tf = final_tf_map[tid]
+                    if tf < min_float_p2:
+                        min_float_p2 = tf
+                        path2_seed = tid
+            
+            if path2_seed:
+                visited_p2 = set()
+                queue_p2 = [path2_seed]
+                
+                while queue_p2:
+                    curr_id = queue_p2.pop(0)
+                    if curr_id in visited_p2:
+                        continue
+                    visited_p2.add(curr_id)
+                    path_ids[curr_id] = 2
+                    
+                    curr_es = ES[curr_id]
+                    
+                    for pid, rtype, lag in predecessors[curr_id]:
+                        # Only follow driving predecessors that aren't already on Path 1
+                        if path_ids[pid] == 1:
+                            continue
+                            
+                        candidate_es = self._forward_constraint(
+                            rtype, lag, ES[pid], EF[pid], dur[curr_id], cal_map, cal_id_map[curr_id]
+                        )
+                        if abs((candidate_es - curr_es).total_seconds()) < 3600:
+                            if pid not in visited_p2:
+                                queue_p2.append(pid)
+
         # ---- Output ----
         def fmt(dt: Optional[datetime]) -> Optional[str]:
             if dt is None:
@@ -558,22 +715,14 @@ class CPMScheduler:
             ls = LS.get(tid, LF.get(tid))
             lf = LF.get(tid)
 
-            # Float in working days
-            cal = self._get_calendar(cal_map, cal_id_map[tid])
-            tf_days = self._working_days_diff(es, ls, cal)
-            
-            # Safe float rounding
-            final_tf = 0.0
-            if not pd.isna(tf_days):
-                final_tf = round(float(tf_days), 2)
-
             results.append({
                 'task_id': tid,
                 'early_start': fmt(es),
                 'early_finish': fmt(ef),
                 'late_start': fmt(ls),
                 'late_finish': fmt(lf),
-                'total_float': final_tf,
+                'total_float': final_tf_map[tid],
+                'path_id': path_ids[tid]
             })
 
         results_df = pd.DataFrame(results)

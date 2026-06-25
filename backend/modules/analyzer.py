@@ -41,28 +41,43 @@ CLASSIFY the user query into EXACTLY one type:
 3. HYBRID_QUERY: Requires BOTH project data and a professional interpretation or explanation. (e.g., "Do I have open ends and are they bad?", "Is my negative float a problem?").
 
 AVAILABLE TOOLS:
-1. get_activity_details(name: str) - Find specific activities/tasks.
-2. get_delayed_activities(limit: int, code_filter: str) - List late or overdue tasks. Pass a code value to filter (e.g. "Construction").
+1. get_activity_details(name: str) - Find specific activities/tasks. IMPORTANT: Use this tool even if the user asks for the "WBS path" of a specific activity (e.g. "show me the wbs path of AMI-1234"). The activity details inherently contain the WBS path. Do NOT use get_wbs_summary for an activity ID/name.
+2. get_delayed_activities(limit: int, code_filter: str) - List tasks with execution delay (overdue to start or finish as of the Data Date). Pass a code value to filter (e.g. "Construction").
 3. get_critical_path(limit: int, code_filter: str) - Critical path queries. Pass a code value to filter.
 4. get_negative_float_activities(limit: int) - Negative float tasks.
 5. get_positive_float_activities(limit: int) - Positive float (slack) tasks.
-6. analyze_activity_delay(activity_name: str) - "Why is X delayed?", "Impact of X".
-7. check_open_ends() - Unlinked tasks (Open starts/finishes).
-8. check_constraints() - Hard/soft constraints.
-9. check_path_continuity() - Broken logic paths.
-10. check_integrity() - General logic checks (DCMA-style).
-11. get_project_health() - Overall health score.
-12. get_wbs_summary(wbs_name: str) - WBS summaries.
-13. get_project_summary() - Duration, start/finish dates, delays, overall project status.
-14. get_resource_summary() - Project-wide resource counts.
-15. get_resource_assignments(activity_name: str) - Resource assignments. Use to find who is working on a specific activity.
-16. get_resource_load() - Resource workload distribution.
-17. get_calendar_info() - Show all calendars in the project: names, working hours, and which is the project default.
-18. get_activity_code_types() - List all Activity Code Types, their scopes, and values defined in the project.
-19. get_activity_code_types_by_scope(scope: str) - List activity code types filtered by a specific scope (valid scopes: 'Project', 'Global', 'EPS'). Use when user asks "Show project activity codes" or "Show global activity codes".
-20. get_activity_code_values(code_type: str) - List all specific values for a given Activity Code Type (e.g. "What utilities exist?").
-21. get_activities_by_code(code_type: str, code_value: str, rollup: bool, exact_match: bool) - Filter activities by a specific Activity Code. Use when user asks for activities of a specific type/category/level/utility/area/trade. IMPORTANT: If the user only provides the value (e.g. "Construction") without explicitly naming the type (e.g. "KPI" or "Levels"), you MUST leave code_type="" so the backend can resolve the ambiguity. Set rollup=True if user asks for activities "under" or "within" a parent area (to include descendants). Set exact_match=True if user asks for activities "directly assigned" to a specific area.
-22. get_wbs_branch_stats() - Get schedule performance per WBS branch. Returns activity count, variance days, delayed count, critical count, and a status tag (On Track/At Risk/Delayed/Critical) for each top-level WBS branch. Use when user asks: "How is each WBS performing?", "Show me branch status", "Which WBS is delayed?", "Show schedule performance by WBS", "SPI by branch" (when EV is not configured).
+6. get_activities_by_status(limit: int, status: str, code_filter: str, wbs_filter: str) - Find activities by their progress status. Use when user asks for "in progress", "partially completed", "completed", "done", "not started", etc. The status argument MUST be one of 'IN_PROGRESS', 'COMPLETED', or 'NOT_STARTED'. Use wbs_filter if they specify a WBS (e.g. "design", "mobilization").
+7. analyze_activity_delay(activity_name: str) - "Why is X delayed?", "Impact of X".
+8. check_open_ends() - Unlinked tasks (Open starts/finishes).
+9. check_constraints() - Hard/soft constraints.
+10. check_path_continuity() - Broken logic paths.
+11. check_integrity() - General logic checks (DCMA-style).
+12. get_project_health() - Overall health score.
+13. get_wbs_summary(wbs_name: str) - WBS summaries.
+14. get_project_summary() - Duration, start/finish dates, delays, overall project status.
+15. get_resource_summary() - Project-wide resource counts.
+16. get_resource_assignments(activity_name: str) - Resource assignments. Use to find who is working on a specific activity.
+17. get_resource_load() - Resource workload distribution.
+18. get_calendar_info() - Show all calendars in the project: names, working hours, and which is the project default.
+19. get_activity_code_types() - List all Activity Code Types, their scopes, and values defined in the project.
+20. get_activity_code_types_by_scope(scope: str) - List activity code types filtered by a specific scope (valid scopes: 'Project', 'Global', 'EPS'). Use when user asks "Show project activity codes" or "Show global activity codes".
+21. get_activity_code_values(code_type: str) - List all specific values for a given Activity Code Type (e.g. "What utilities exist?").
+22. get_activities_by_code(code_type: str, code_value: str, rollup: bool, exact_match: bool) - Filter activities by a specific Activity Code. Use when user asks for activities of a specific type/category/level/utility/area/trade. IMPORTANT: If the user only provides the value (e.g. "Construction", "WATER NETWORK") without explicitly naming the type (e.g. "KPI" or "Levels"), you MUST leave code_type="" so the backend can resolve the ambiguity. Set rollup=True if user asks for activities "under" or "within" a parent area (to include descendants). Set exact_match=True if user asks for activities "directly assigned" to a specific area.
+23. get_filtered_activities(limit: int, status: str, code_filter: str, wbs_filter: str, is_delayed: bool, is_at_risk: bool, cost_loaded: bool, evm_filter: str, sort_by: str) - Advanced filter tool. Use when the user combines multiple filters, EVM metrics, or sorting queries (e.g. "show all cost-loaded delayed activities", "top 10 highest BAC", "SPI < 1", "in-progress BOQ activities with cost data").
+      - `cost_loaded`: set to true if user asks for activities with budget, cost data, or BAC > 0.
+      - `evm_filter`: 'spi_lt_1', 'cpi_lt_1', 'sv_neg', 'cv_neg'.
+      - `sort_by`: 'bac_desc', 'ev_desc', 'variance_desc', 'delay_desc'.
+24. get_wbs_branch_stats() - Get schedule performance per WBS branch. Returns activity count, variance days, delayed count, at_risk_count, critical count, and a status tag (On Track/At Risk/Delayed/Critical/Completed) for each top-level WBS branch. Use when user asks: "How is each WBS performing?", "Show me branch status", "Which WBS is delayed?", "Show schedule performance by WBS", "SPI by branch" (when EV is not configured).
+25. get_at_risk_activities(limit: int, code_filter: str) - List activities currently classified as At Risk (forecast finish exceeds baseline plus threshold, but not yet execution delayed). Pass a code value to filter.
+26. get_baseline_pairing_status() - Check whether the baseline and update schedules are correctly paired. Shows overlap percentage, project names, and validation status. Use when user asks: "Is the baseline paired?", "Check baseline status", "Why is variance not working?".
+27. get_activities_by_calendar(calendar_name: str, calendar_id: str, workweek_type: str, semantic_tag: str, limit: int) - Filter activities by calendar. Use when user asks for activities on a specific calendar, workweek type, or calendar tag.
+      - `workweek_type`: '5-day', '6-day', '7-day'.
+      - `semantic_tag`: 'RAMADAN', 'SUMMER', 'NIGHT_SHIFT', 'SHIFT'.
+      - `calendar_name`: partial match on calendar name.
+28. get_calendar_exceptions(calendar_name: str, month: int, year: int, exception_type: str, limit: int) - Retrieve exception dates for a calendar. Use when user asks "show exception dates", "show holidays", "show working Saturdays", etc. 
+      - `exception_type`: 'holiday' (for non-working dates), 'working' (for overrides).
+      - `month`: 1-12 or None.
+      - `year`: 4-digit year or None.
 
 ACTIVITY CODE ROUTING RULES:
 - When a user asks about "Construction activities", "Sewer activities", "Sector 1A", or any category that matches a detected Activity Code Type or Value, route to get_activities_by_code.
@@ -71,8 +86,22 @@ ACTIVITY CODE ROUTING RULES:
 - When a user asks "show me all code types" or "what activity codes are in this project?", route to get_activity_code_types.
 - When a user asks for codes by scope (e.g., "project activity codes", "global codes"), route to get_activity_code_types_by_scope.
 - When a user asks "what values exist for X" or "list all areas/utilities/levels", route to get_activity_code_values.
-- When a user asks for delayed/critical activities filtered by a code value (e.g., "delayed Construction activities"), route to get_delayed_activities or get_critical_path with the code_filter argument.
+- When a user asks for delayed/critical/partially completed activities filtered by a code value (e.g., "delayed Construction activities", "partially completed WATER NETWORK"), route to get_filtered_activities and pass the relevant arguments.
+- When a user asks for activities filtered by cost (e.g. "cost loaded", "SPI < 1", "highest BAC"), route to get_filtered_activities.
+- When a user asks for activities filtered by WBS (e.g. "show me in progress design activities", "delayed mobilization tasks"), route to the respective tool and pass the WBS name/path in the wbs_filter argument.
 {DETECTED_CODE_TYPES}
+
+CALENDAR ROUTING RULES (B-041):
+- "Which calendar does activity X use?" → get_activity_details (calendar info is included in the response).
+- "List all 7-day calendar activities" → get_activities_by_calendar(workweek_type="7-day").
+- "Show Ramadan calendar activities" → get_activities_by_calendar(semantic_tag="RAMADAN").
+- "How many calendars are there?" / "Show all calendars" → get_calendar_info.
+- "How many working days are there?" / "How many working days in this calendar?" → get_calendar_info.
+- If the user provides just a calendar name as a follow-up (e.g. "stage 28 6 day") → Review conversation history. If the previous question asked about exceptions, holidays, or dates, route to get_calendar_exceptions(calendar_name="..."), AND preserve any other arguments/filters (like month, year) from their original query. Otherwise, route to get_calendar_info(calendar_name="..."). Do NOT route to get_activities_by_calendar unless they explicitly ask for activities.
+- "Show exception dates", "Show holidays", "Show working Saturdays", "Show exceptions in January 2026", "What are the exception dates for X" → get_calendar_exceptions.
+- "What holidays affect this activity?" → get_activity_details (calendar_holidays are included).
+- "Why is this activity taking longer?" → analyze_activity_delay (calendar info enriches the analysis).
+- "Is the baseline valid?" / "Check baseline pairing" → get_baseline_pairing_status.
 
 ROUTING RULES:
 - If KNOWLEDGE_QUERY: Do NOT call any tool. Return tool: "direct_response".
@@ -80,7 +109,8 @@ ROUTING RULES:
 - If HYBRID_QUERY: Match to the relevant tool, but signal that interpretation is needed.
 - "Why", "Is it bad", "Explain the impact" questions should always be HYBRID or KNOWLEDGE.
 - FOLLOW-UP RESOLUTION: If the user asks "who is working on it?", "what about its delay?", "show me its resources", resolve "it/this/that" to the Last Activity Discussed (provided below). Include the resolved activity name in the arguments.
-- DISAMBIGUATION: If the user selects an item from a previous list (e.g. "5th one", "number 2"), you MUST review the conversation history, extract the EXACT code_value and code_type of the selected item, and call get_activities_by_code with those explicit values and exact_match=True. Do NOT output the disambiguation prompt again.
+- DATE FILTERS: When a user asks a follow-up question involving "all" (e.g., "show me all holidays", "list all exceptions"), you MUST drop any previous month/year filters and set them to null to retrieve the entire list.
+- DISAMBIGUATION: If the user responds to a list with an index or selection (e.g., "4th one", "number 2", "the last one", "first one"), you MUST call the relevant tool (e.g., get_calendar_exceptions) AND you MUST set the `calendar_name` (or relevant argument) to exactly their selection string (e.g., "4th one"). Do NOT leave the calendar_name argument empty. Preserve any other filters from their original query.
 
 Return ONLY a JSON object:
 {"query_type": "DATA_QUERY|KNOWLEDGE_QUERY|HYBRID_QUERY", "tool": "tool_name", "arguments": {}}"""
@@ -118,11 +148,27 @@ GUIDELINES:
   └ SECTOR 1B
 - WBS BRANCH STATS (template_type: wbs_branch_stats): When data comes from get_wbs_branch_stats, you MUST format as a markdown table with columns: WBS Branch | Activities | Delayed | Critical | Variance Days | Status. Add a prominent note at the top: "⚠️ Earned Value (SPI/CPI) is not available for this project — all activities use Duration % Complete. The Status Tag is derived from delay ratio and critical path ratio." Sort Critical/Delayed rows first. Explain the status logic briefly.
 - GREETINGS & CONVERSATION: If the user says "Hello", "Hi", "Good morning", or gives a standard greeting, you MUST reply warmly and professionally. Greet them back, state that you are their XerAgent planning assistant, and suggest a few specific things they can ask you about the schedule (e.g., critical path, delays, health score). Do NOT trigger the scope refusal. Do NOT claim that no data is loaded just because the data array is empty; a greeting simply doesn't require querying activities.
-- SCOPE REFUSAL: You only answer construction scheduling or project control questions related to the loaded project (e.g., '{PROJECT_NAME}'). If the user asks about weather, news, sports, or general off-topic questions (excluding standard greetings), you MUST refuse to answer. Use exactly this pattern for your summary: "I help with construction schedule questions for the '{PROJECT_NAME}' project. I don't answer weather, news, or general questions. Try asking about activities, variance, critical path, or trade scope status."
+- SCOPE REFUSAL: You only answer construction scheduling or project control questions related to the loaded project (e.g., '{PROJECT_NAME}'). If the user asks about weather, news, sports, or general off-topic questions, you MUST refuse to answer. EXCEPTIONS: Any question mentioning calendars, holidays, workweeks, or specific working exceptions (e.g., "Ramadan", "Summer", "Christmas", "Eid") MUST NOT trigger a scope refusal. These are valid schedule inquiries. For off-topic questions only, use exactly this pattern for your summary: "I help with construction schedule questions for the '{PROJECT_NAME}' project. I don't answer weather, news, or general questions. Try asking about activities, variance, critical path, or trade scope status."
+- CALENDAR GROUNDING: Never estimate calendar values, working days, or exception counts. Never use words like "typically", "usually", "assuming", "would have", "might have", "probably", or "generally". Rely STRICTLY on the injected backend payload. If a requested calendar does not exist, explicitly say: "No such calendar exists in the uploaded XER." If the calendar exists but has no exceptions for the requested date, explicitly state: "No exceptions match the specified date criteria for this calendar." Do NOT estimate. If the user asks about 'Ramadan' and no matching calendar/exception is found, you MUST state exactly: "No calendar, exception, or holiday containing 'Ramadan' exists in the uploaded XER. Therefore the system cannot determine a Ramadan-specific calendar."
+- CALENDAR FORMATTING: When answering calendar questions, you MUST format all dates as 'MMM D, YYYY' (e.g., 'Jun 12, 2026'). You MUST ALWAYS structure responses using this exact format (including the markdown and source footer):
+  **Calendar Name**
+  * Workweek: [Type]
+  * Hours/day: [Hours]
+  * Non-working dates: [Effective Count] affecting project ([Total Count] total)
+  * Working overrides: [Effective Count] affecting project ([Total Count] total)
+  
+  **Exception Dates Found:**
+  [Provide exact Holiday/Exception Dates in a bulleted list, formatted as '* MMM D, YYYY ([type of exception])'. Example: '* Jun 17, 2026 (Non-working)'. If holiday count is 0 but exceptions exist, explicitly state: "No named holidays are defined. However calendar exceptions exist."]
+  
+  *(Note: Dates shown are effective dates within the project period. The calendar contains historical exceptions that are hidden because they do not affect this project.)*
+  
+  Source:
+  Parsed directly from uploaded XER.
 - DUAL MODE: 
     - For KNOWLEDGE queries: Answer directly and thoroughly using your internal knowledge.
     - For DATA/HYBRID queries: Use the provided BACKEND DATA for numbers, but use your intelligence for the "Why" and "So What".
 - NOTE ON CRITICAL PATH: Any task with float <= 0 is considered critical. Do not assume tasks are missing or invalid if float is 0.
+- AMBIGUOUS CALENDAR QUERIES: If the user asks a general question like "How many working days are there?" without specifying a calendar, and the backend data returns multiple calendars, you MUST NOT dump all calendars. Instead, reply EXACTLY with: "Multiple calendars exist in this project. \n\n* [List calendar names here] \n\nPlease specify:\n• calendar name\n• activity\n• or date range"
 - ACTIVITY COUNT CONTEXT: The backend payload includes `total_project_activities` (the full project scope). If a `filtered_subset_total` is provided (e.g., when a user filters by an Activity Code), you MUST frame your response around both totals! Example: "There are 2,861 Construction activities delayed out of 2,867 Construction activities (99.8%), while the project overall has 4,869 total activities." ALWAYS calculate and state the percentage in your summary. Never say "all activities" unless the delayed/critical count equals the total project activities.
 - RECOMMENDATIONS FORMAT: Each item in the `recommendations` array MUST be a plain string, never a JSON object or dict. Do NOT return {"action":"...","reason":"..."}. Just write: "Monitor X — because Y."
 
@@ -325,6 +371,9 @@ class XERAnalyzer:
         elif tool == "get_delayed_activities":
             code_filter = args.get("code_filter")
             result = self.get_delayed_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version, code_filter=code_filter)
+        elif tool == "get_at_risk_activities":
+            code_filter = args.get("code_filter")
+            result = self.get_at_risk_activities(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version, code_filter=code_filter)
         elif tool == "get_critical_activities" or tool == "get_critical_path":
             code_filter = args.get("code_filter")
             result = self.get_critical_path(limit=args.get("limit", 20), context=ctx, wbs_filter=selected_wbs, version_id=selected_version, code_filter=code_filter)
@@ -380,6 +429,30 @@ class XERAnalyzer:
                         "stats": {"metric": metric_type, "value": val},
                         "template_type": "metric"
                     }
+        elif tool == "get_activities_by_status":
+            result = self.get_activities_by_status(
+                limit=args.get("limit", 20),
+                status=args.get("status", "IN_PROGRESS"),
+                code_filter=args.get("code_filter"),
+                wbs_filter=args.get("wbs_filter"),
+                context=ctx,
+                version_id=selected_version
+            )
+        elif tool == "get_filtered_activities":
+            result = self.get_filtered_activities(
+                limit=args.get("limit", 20),
+                status=args.get("status"),
+                code_filter=args.get("code_filter"),
+                wbs_filter=args.get("wbs_filter"),
+                is_delayed=args.get("is_delayed"),
+                is_at_risk=args.get("is_at_risk"),
+                is_critical=args.get("is_critical"),
+                cost_loaded=args.get("cost_loaded"),
+                evm_filter=args.get("evm_filter"),
+                sort_by=args.get("sort_by"),
+                context=ctx,
+                version_id=selected_version
+            )
         elif tool == "analyze_activity_delay":
             name = args.get("activity_name", "")
             if not name and session.get("last_search_term"): name = session["last_search_term"]
@@ -396,7 +469,7 @@ class XERAnalyzer:
         elif tool == "get_resource_load":
             result = self.resource_engine.get_resource_load(context=ctx)
         elif tool == "get_calendar_info":
-            result = self.get_calendar_info(context=ctx, version_id=selected_version)
+            result = self.get_calendar_info(calendar_name=args.get("calendar_name"), context=ctx, version_id=selected_version)
         elif tool == "get_activity_code_types":
             result = self.get_activity_code_types_tool(context=ctx, version_id=selected_version)
         elif tool == "get_activity_code_types_by_scope":
@@ -417,8 +490,29 @@ class XERAnalyzer:
             )
         elif tool == "get_wbs_branch_stats":
             result = self.get_wbs_branch_stats(context=ctx, version_id=selected_version)
+        elif tool == "get_baseline_pairing_status":
+            result = self.get_baseline_pairing_status(context=ctx)
+        elif tool == "get_activities_by_calendar":
+            result = self.get_activities_by_calendar(
+                calendar_name=args.get("calendar_name"),
+                calendar_id=args.get("calendar_id"),
+                workweek_type=args.get("workweek_type"),
+                semantic_tag=args.get("semantic_tag"),
+                limit=args.get("limit", 50),
+                context=ctx, version_id=selected_version
+            )
+        elif tool == "get_calendar_exceptions":
+            result = self.get_calendar_exceptions(
+                calendar_name=args.get("calendar_name"),
+                month=args.get("month"),
+                year=args.get("year"),
+                exception_type=args.get("exception_type"),
+                limit=args.get("limit", 100),
+                context=ctx, version_id=selected_version
+            )
         else:
             result = {"success": False, "clarify": True, "total_count": 0, "data": []}
+
             
         result["tool"] = tool
         result["arguments"] = args
@@ -712,6 +806,9 @@ class XERAnalyzer:
         analysis = self.data_store.get_deterministic_analysis(version_id=source['id'], context=context).get("activityAnalysis", {})
         code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context)
         
+        # B-041: Get calendar map for enrichment
+        cal_map = self.data_store.get_calendar_map(version_id=version_id, context=context)
+        
         full_data = []
         for r in combined_list:
             tid = r["task_id"]
@@ -732,6 +829,10 @@ class XERAnalyzer:
                     "scope": code_types.get(k, {}).get("scope", "Global")
                 }
 
+            # B-041: Calendar enrichment
+            cal_id = str(r.get("clndr_id", ""))
+            cal_info = cal_map.get(cal_id, {})
+
             full_data.append({
                 "id": tid, "code": r["task_code"], "name": r["task_name"],
                 "status": display_status,
@@ -741,8 +842,15 @@ class XERAnalyzer:
                 "is_critical": float_hrs <= 0,
                 "delay_days": act_analysis.get("delay_days"),
                 "wbs_path": r.get("wbs_path", ""),
-                "activity_codes": codes_payload
+                "activity_codes": codes_payload,
+                # B-041: Calendar fields
+                "calendar_id": cal_id,
+                "calendar_name": cal_info.get("name", ""),
+                "calendar_hours_per_day": cal_info.get("hours_per_day"),
+                "workweek_type": cal_info.get("workweek_type", ""),
+                "calendar_holidays": cal_info.get("holidays", []),
             })
+
             
         data_ref = self.data_store.store_result(full_data)
         
@@ -848,6 +956,13 @@ class XERAnalyzer:
         source = self.data_store.get_latest(context=context, version_id=version_id)
         if source and source.get("type") == "baseline":
             return {"success": False, "error": "Cannot compute delays or list delayed activities because only the baseline schedule is loaded. Delay analysis requires actual progress updates."}
+        
+        # B-040: Check baseline pairing validity
+        ctx = self.data_store.contexts.get(context, self.data_store.contexts["audit"])
+        pairing = ctx.get("baseline_pairing", {})
+        if pairing and not pairing.get("valid"):
+            reason = pairing.get("reason", "Baseline pairing validation failed.")
+            return {"success": False, "error": reason}
             
         vid = source['id'] if source else None
         analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
@@ -855,7 +970,7 @@ class XERAnalyzer:
         acts = self._filter_wbs(acts, wbs_filter, source)
         acts = self._filter_by_code(acts, code_filter)
         
-        delayed = {tid: a for tid, a in acts.items() if (a.get("delay_days") or 0) > 0 and a.get("status_enum") != "COMPLETED"}
+        delayed = {tid: a for tid, a in acts.items() if a.get("classification") == "DELAYED"}
         sorted_acts = sorted(delayed.items(), key=lambda x: x[1].get("delay_days", 0), reverse=True)
         hpd = source.get("hours_per_day", 8) if source else 8
         
@@ -865,6 +980,7 @@ class XERAnalyzer:
                       "delay_days": a.get("delay_days", 0),
                       "float_days": round(a.get("float_hrs", 0) / hpd, 1),
                       "status": a.get("status_enum",""),
+                      "classification": "DELAYED",
                       "activity_codes": a.get("activity_codes", {})} for tid, a in sorted_acts]
         
         data_ref = self.data_store.store_result(full_data)
@@ -881,6 +997,49 @@ class XERAnalyzer:
                 "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
                 "stats": {"max_delay_days": max(delays) if delays else 0,
                           "avg_delay_days": round(sum(delays)/len(delays), 1) if delays else 0,
+                          "total_project_activities": len(analysis.get("activityAnalysis", {})),
+                          "filtered_subset_total": len(acts),
+                          "filter_applied": filter_label}}
+
+    def get_at_risk_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None, code_filter: Optional[Dict] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        if source and source.get("type") == "baseline":
+            return {"success": False, "error": "Cannot compute risks or list at-risk activities because only the baseline schedule is loaded. Risk analysis requires actual progress updates."}
+            
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
+        acts = analysis.get("activityAnalysis", {})
+        acts = self._filter_wbs(acts, wbs_filter, source)
+        acts = self._filter_by_code(acts, code_filter)
+        
+        at_risk = {tid: a for tid, a in acts.items() if a.get("classification") == "AT_RISK"}
+        sorted_acts = sorted(at_risk.items(), key=lambda x: x[1].get("forecast_slip_days", 0), reverse=True)
+        hpd = source.get("hours_per_day", 8) if source else 8
+        
+        wbs_map = self._get_wbs_map(source)
+        full_data = [{"id": tid, "code": a.get("task_code",""), "name": a.get("task_name",""),
+                      "wbs_path": wbs_map.get(str(a.get("wbs_id")), str(a.get("wbs_id", ""))),
+                      "slip_days": a.get("forecast_slip_days", 0),
+                      "threshold_days": round(a.get("threshold_days", 5.0), 1),
+                      "float_days": round(a.get("float_hrs", 0) / hpd, 1),
+                      "status": a.get("status_enum",""),
+                      "classification": "AT_RISK",
+                      "activity_codes": a.get("activity_codes", {})} for tid, a in sorted_acts]
+        
+        data_ref = self.data_store.store_result(full_data)
+        preview_data = full_data[:limit]
+        slips = [a.get("forecast_slip_days", 0) for a in at_risk.values()]
+        
+        filter_label = ""
+        if isinstance(code_filter, str):
+            filter_label = f" (filtered by {code_filter})"
+        elif isinstance(code_filter, dict):
+            filter_label = f" (filtered by {code_filter.get('code_type', '')} = {code_filter.get('code_value', '')})"
+        
+        return {"success": True, "total_count": len(full_data), "displayed_count": len(preview_data),
+                "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
+                "stats": {"max_slip_days": max(slips) if slips else 0,
+                          "avg_slip_days": round(sum(slips)/len(slips), 1) if slips else 0,
                           "total_project_activities": len(analysis.get("activityAnalysis", {})),
                           "filtered_subset_total": len(acts),
                           "filter_applied": filter_label}}
@@ -1315,6 +1474,134 @@ class XERAnalyzer:
                 "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
                 "stats": {"max_float_days": round(max(floats), 1) if floats else 0}}
 
+    def get_activities_by_status(self, limit: int = 20, status: str = "IN_PROGRESS", code_filter: Optional[str] = None, wbs_filter: Optional[str] = None, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
+        acts = analysis.get("activityAnalysis", {})
+        
+        acts = self._filter_wbs(acts, wbs_filter, source)
+        
+        if code_filter:
+            acts = self._filter_by_code(acts, code_filter, self.data_store.get_activity_code_types(vid, context))
+            
+        status = status.upper()
+        if status not in ["IN_PROGRESS", "COMPLETED", "NOT_STARTED"]:
+            status = "IN_PROGRESS"
+            
+        filtered_acts = {tid: a for tid, a in acts.items() if a.get("status_enum") == status}
+        
+        # Sort by early start if available, else by ID
+        def get_es(a):
+            dt = a.get("early_start")
+            if dt and str(dt) != "nan" and str(dt).strip() != "":
+                return str(dt)
+            return "9999-12-31"
+            
+        sorted_acts = sorted(filtered_acts.items(), key=lambda x: (get_es(x[1]), x[1].get("task_code", "")))
+        
+        wbs_map = self._get_wbs_map(source)
+        full_data = [{"id": tid, "code": a.get("task_code",""), "name": a.get("task_name",""),
+                      "wbs_path": wbs_map.get(str(a.get("wbs_id")), str(a.get("wbs_id", ""))),
+                      "status": a.get("status_enum")} for tid, a in sorted_acts]
+                      
+        data_ref = self.data_store.store_result(full_data)
+        preview_data = full_data[:limit]
+        
+        return {"success": True, "total_count": len(full_data), "displayed_count": len(preview_data),
+                "is_truncated": len(full_data) > limit, "data": preview_data, "display_items": preview_data, "all_items": full_data, "data_ref": data_ref,
+                "stats": {"status_type": status}}
+
+
+    def get_filtered_activities(self, limit: int = 20, status: Optional[str] = None, code_filter: Optional[str] = None, wbs_filter: Optional[str] = None, is_delayed: Optional[bool] = None, is_at_risk: Optional[bool] = None, is_critical: Optional[bool] = None, cost_loaded: Optional[bool] = None, evm_filter: Optional[str] = None, sort_by: Optional[str] = None, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        if not source: return {"success": False, "error": "No project loaded."}
+        
+        # Pull table data from HIERARCHY to inherit EVM and Cost calculations
+        tree_resp = self.data_store.get_table_data(table_type="HIERARCHY", limit=999999, context=context, source_id=source['id'])
+        
+        def flatten_wbs(nodes):
+            res = []
+            for n in nodes:
+                res.extend(n.get("activities", []))
+                res.extend(flatten_wbs(n.get("children", [])))
+            return res
+            
+        acts = flatten_wbs(tree_resp.get("records", []))
+        
+        debug_info = {}
+        debug_info["1_total_table_acts"] = len(acts)
+        ami = next((a for a in acts if a.get("task_code") == "AMI-FXCH-1080"), None)
+        debug_info["ami_initial"] = ami.copy() if ami else "NOT_FOUND"
+
+        # Base filter using analysis dict for WBS and Codes
+        analysis = self.data_store.get_deterministic_analysis(version_id=source['id'], context=context).get("activityAnalysis", {})
+        debug_info["2_total_analysis_keys"] = len(analysis)
+        
+        if wbs_filter:
+            analysis = self._filter_wbs(analysis, wbs_filter, source)
+        if code_filter:
+            analysis = self._filter_by_code(analysis, code_filter, self.data_store.get_activity_code_types(source['id'], context))
+            
+        allowed_tids = {str(k) for k in analysis.keys()}
+        acts = [a for a in acts if str(a.get("task_id")) in allowed_tids]
+        debug_info["3_after_allowed_tids"] = len(acts)
+        debug_info["ami_after_allowed"] = any(a.get("task_code") == "AMI-FXCH-1080" for a in acts)
+        
+        if status:
+            acts = [a for a in acts if a.get("_analysis", {}).get("status") == status.upper()]
+        debug_info["4_after_status"] = len(acts)
+        debug_info["ami_after_status"] = any(a.get("task_code") == "AMI-FXCH-1080" for a in acts)
+        
+        if is_delayed is True:
+            acts = [a for a in acts if a.get("_analysis", {}).get("classification") == "DELAYED"]
+            
+        if is_at_risk is True:
+            acts = [a for a in acts if a.get("_analysis", {}).get("classification") == "AT_RISK"]
+            
+        if is_critical is True:
+            acts = [a for a in acts if a.get("_analysis", {}).get("float_hrs", 0) <= 0 and a.get("_analysis", {}).get("status") != "COMPLETED"]
+            
+        if cost_loaded is True:
+            acts = [a for a in acts if a.get("cost_loaded", False)]
+        debug_info["5_after_cost_loaded"] = len(acts)
+        debug_info["ami_after_cost"] = any(a.get("task_code") == "AMI-FXCH-1080" for a in acts)
+            
+        if evm_filter == "spi_lt_1":
+            acts = [a for a in acts if a.get("spi") is not None and a.get("spi") < 1.0]
+        elif evm_filter == "cpi_lt_1":
+            acts = [a for a in acts if a.get("cpi") is not None and a.get("cpi") < 1.0]
+        elif evm_filter == "sv_neg":
+            acts = [a for a in acts if a.get("sv_cost", 0) < 0]
+        elif evm_filter == "cv_neg":
+            acts = [a for a in acts if a.get("cv_cost", 0) < 0]
+            
+        if sort_by == "bac_desc":
+            acts.sort(key=lambda x: max(x.get("budget_cost", 0), x.get("bl_project_cost", 0)), reverse=True)
+        elif sort_by == "ev_desc":
+            acts.sort(key=lambda x: x.get("ev_cost", 0), reverse=True)
+        elif sort_by == "variance_desc":
+            acts.sort(key=lambda x: abs(x.get("sv_cost", 0)), reverse=True)
+        elif sort_by == "delay_desc":
+            acts.sort(key=lambda x: x.get("_analysis", {}).get("delay_days", 0), reverse=True)
+            
+        # Flatten properties for cleaner AI context
+        for a in acts:
+            an = a.get("_analysis", {})
+            a["status"] = an.get("status", "NOT_STARTED")
+            a["delay_days"] = an.get("delay_days", 0)
+            a["float_hrs"] = an.get("float_hrs", 0)
+            a["is_critical"] = an.get("is_critical", False)
+            a["classification"] = an.get("classification", "ON_TRACK")
+            a.pop("_analysis", None)
+            
+        preview = acts[:limit]
+        data_ref = self.data_store.store_result(preview)
+        
+        return {"success": True, "total_count": len(acts), "displayed_count": len(preview),
+                "is_truncated": len(acts) > limit, "data": preview, "display_items": preview, "all_items": acts, "data_ref": data_ref,
+                "stats": {"filters": {"status": status, "cost_loaded": cost_loaded, "evm": evm_filter}, "debug": debug_info}}
+
     def get_project_health(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
         source = self.data_store.get_latest(context=context, version_id=version_id)
         vid = source['id'] if source else None
@@ -1391,8 +1678,9 @@ class XERAnalyzer:
         except Exception:
             duration_days = 0
             
-        # Count delayed and completed activities
-        delayed_acts = {tid: a for tid, a in acts.items() if a.get("delay_days") is not None and a.get("delay_days", 0) > 0 and a.get("status_enum") != "COMPLETED"}
+        # Count delayed, at risk and completed activities
+        delayed_acts = {tid: a for tid, a in acts.items() if a.get("classification") == "DELAYED"}
+        at_risk_acts = {tid: a for tid, a in acts.items() if a.get("classification") == "AT_RISK"}
         completed_acts = {tid: a for tid, a in acts.items() if a.get("status_enum") == "COMPLETED"}
         in_progress_acts = {tid: a for tid, a in acts.items() if a.get("status_enum") == "IN_PROGRESS"}
         project_summary = analysis.get("projectSummary", {})
@@ -1408,7 +1696,8 @@ class XERAnalyzer:
             "non_critical_count": total_acts - critical_count,
             "completed_activities": len(completed_acts),
             "in_progress_activities": len(in_progress_acts),
-            "delayed_activities": len(delayed_acts) if project_delay_days is not None else None,
+            "delayed_activities": len(delayed_acts),
+            "at_risk_activities": len(at_risk_acts),
             "project_delay_days": project_delay_days,
             "max_delay_days": max(delays) if delays else (None if project_delay_days is None else 0),
             "avg_delay_days": round(sum(delays) / len(delays), 1) if delays else (None if project_delay_days is None else 0)
@@ -1426,11 +1715,32 @@ class XERAnalyzer:
             "template_type": "health"
         }
 
-    def get_calendar_info(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
-        """Returns structured calendar information for the loaded project."""
+    def get_calendar_info(self, calendar_name: Optional[str] = None, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        """Returns structured calendar information for the loaded project (B-041 enhanced)."""
         calendars = self.data_store.get_calendar_info(version_id=version_id, context=context)
         if not calendars:
             return {"success": False, "error": "No calendar data found in the loaded schedule.", "clarify": True, "total_count": 0, "data": [], "display_items": []}
+            
+        if calendar_name:
+            search_str = calendar_name.lower().replace(" ", "").replace("-", "").replace("_", "")
+            cals = [c for c in calendars if search_str in c.get('name', '').lower().replace(" ", "").replace("-", "").replace("_", "")]
+            if cals:
+                calendars = cals
+        elif len(calendars) > 1:
+            # If no specific calendar requested, but multiple exist, return a clarify payload.
+            names = "\n* ".join(c.get("name", "") for c in calendars)
+            return {"success": False, "error": f"Multiple calendars exist in this project.\n\n* {names}\n\nPlease specify:\n\n• calendar name\n• activity\n• or date range", "clarify": True, "total_count": 0, "data": [], "display_items": []}
+        
+        # B-041: Compute enhanced stats
+        workweek_counts = {}
+        semantic_counts = {}
+        total_holidays = 0
+        for c in calendars:
+            wt = c.get("workweek_type", "unknown")
+            workweek_counts[wt] = workweek_counts.get(wt, 0) + 1
+            for tag in c.get("semantic_tags", []):
+                semantic_counts[tag] = semantic_counts.get(tag, 0) + 1
+            total_holidays += c.get("holiday_count", 0)
         
         return {
             "success": True,
@@ -1444,7 +1754,145 @@ class XERAnalyzer:
                 "total_calendars": len(calendars),
                 "project_default": next((c["name"] for c in calendars if c.get("is_project_default")), "Not identified"),
                 "hours_per_day": next((c["hours_per_day"] for c in calendars if c.get("is_project_default")), None),
+                "workweek_distribution": workweek_counts,
+                "semantic_tags": semantic_counts,
+                "total_holidays": total_holidays,
             },
+            "template_type": "list"
+        }
+
+    def get_baseline_pairing_status(self, context: str = "audit") -> Dict:
+        """B-040: Returns the current baseline-update pairing status."""
+        pairing = self.data_store.validate_baseline_pairing(context=context)
+        return {
+            "success": True,
+            "total_count": 1,
+            "displayed_count": 1,
+            "is_truncated": False,
+            "data": [pairing],
+            "display_items": [pairing],
+            "all_items": [pairing],
+            "stats": {
+                "is_valid": pairing.get("valid", False),
+                "overlap_pct": pairing.get("overlap_pct"),
+                "baseline_name": pairing.get("baseline_name", "Not loaded"),
+                "update_name": pairing.get("update_name", "Not loaded"),
+                "reason": pairing.get("reason"),
+            },
+            "template_type": "status"
+        }
+
+    def get_activities_by_calendar(self, calendar_name: Optional[str] = None, calendar_id: Optional[str] = None,
+                                    workweek_type: Optional[str] = None, semantic_tag: Optional[str] = None,
+                                    limit: int = 50, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        """B-041: Filter activities by calendar criteria. Delegates to data_store."""
+        return self.data_store.get_activities_by_calendar(
+            calendar_name=calendar_name,
+            calendar_id=calendar_id,
+            workweek_type=workweek_type,
+            semantic_tag=semantic_tag,
+            limit=limit,
+            version_id=version_id,
+            context=context
+        )
+
+    def get_calendar_exceptions(self, calendar_name: Optional[str] = None, month: Optional[int] = None, 
+                                year: Optional[int] = None, exception_type: Optional[str] = None, date_filter: str = "effective",
+                                limit: int = 100, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        """B-041: Retrieve specific exception dates for a calendar."""
+        print(f"[DEBUG] get_calendar_exceptions called with: calendar_name={calendar_name}, month={month}, year={year}, exception_type={exception_type}")
+        calendars = self.data_store.get_calendar_info(version_id=version_id, context=context)
+        if not calendars:
+            return {"success": False, "error": "No calendar data found.", "clarify": True, "total_count": 0, "data": []}
+            
+        if calendar_name:
+            search_str = calendar_name.lower().replace(" ", "").replace("-", "").replace("_", "")
+            cals = []
+            
+            # Handle positional names like "4th one", "number 2", "second one"
+            import re
+            
+            # Map words to numbers
+            word_to_num = {'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5, 'sixth': 6, 'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10, 'last': len(calendars)}
+            
+            idx = None
+            pos_match = re.search(r'(\d+)(st|nd|rd|th)?\s*(one)?|number\s*(\d+)', calendar_name.lower())
+            if pos_match:
+                idx_str = pos_match.group(1) or pos_match.group(4)
+                if idx_str:
+                    idx = int(idx_str) - 1
+            else:
+                for word, num in word_to_num.items():
+                    if word in calendar_name.lower():
+                        idx = num - 1
+                        break
+                        
+            if idx is not None and 0 <= idx < len(calendars):
+                cals = [calendars[idx]]
+            
+            if not cals:
+                cals = [c for c in calendars if search_str in c.get('name', '').lower().replace(" ", "").replace("-", "").replace("_", "")]
+        else:
+            cals = calendars
+            
+        if len(cals) > 1 and not calendar_name:
+            names = "\n* ".join(c.get("name", "") for c in calendars)
+            return {"success": False, "error": f"Multiple calendars exist in this project.\n\n* {names}\n\nPlease specify:\n\n• calendar name\n• activity\n• or date range", "clarify": True, "total_count": 0, "data": []}
+        
+        all_exceptions = []
+        for c in cals:
+            # Gather exceptions
+            nw_key = "effective_non_working_dates" if date_filter == "effective" else "raw_non_working_dates"
+            w_key = "effective_working_overrides" if date_filter == "effective" else "raw_working_overrides"
+            
+            holidays = [{"date": d, "type": "non_working", "calendar": c["name"]} for d in c.get(nw_key, c.get("non_working_exceptions", []))]
+            working = [{"date": d, "type": "working", "calendar": c["name"]} for d in c.get(w_key, c.get("working_exceptions", []))]
+            
+            combined = []
+            if not exception_type or "holiday" in exception_type.lower() or "non" in exception_type.lower():
+                combined.extend(holidays)
+            if not exception_type or "working" in exception_type.lower() and "non" not in exception_type.lower():
+                combined.extend(working)
+                
+            print(f"[DEBUG] Calendar {c['name']} - holidays size: {len(holidays)}, working size: {len(working)}, combined: {len(combined)}")
+            for ex in combined:
+                d_parts = ex["date"].split('-')
+                if len(d_parts) == 3:
+                    y, m, d = int(d_parts[0]), int(d_parts[1]), int(d_parts[2])
+                    if year and y != int(year): continue
+                    if month and m != int(month): continue
+                all_exceptions.append(ex)
+                
+        print(f"[DEBUG] all_exceptions size: {len(all_exceptions)}")
+        # Sort by date
+        all_exceptions.sort(key=lambda x: x["date"])
+        
+        total_count = len(all_exceptions)
+        display_data = all_exceptions[:limit]
+        
+        # Include metadata for the matched calendar
+        cal_metadata = {}
+        if cals and len(cals) == 1:
+            cal = cals[0]
+            cal_metadata = {
+                "name": cal.get("name"),
+                "workweek_type": cal.get("workweek_type"),
+                "hours_per_day": cal.get("hours_per_day"),
+                "total_effective_non_working": cal.get("effective_non_working_dates_count"),
+                "total_raw_non_working": cal.get("raw_non_working_dates_count"),
+                "total_effective_working_overrides": cal.get("effective_working_overrides_count", 0),
+                "total_raw_working_overrides": cal.get("raw_working_overrides_count", 0)
+            }
+        
+        return {
+            "success": True,
+            "total_count": total_count,
+            "displayed_count": len(display_data),
+            "is_truncated": total_count > limit,
+            "data": display_data,
+            "all_items": all_exceptions,
+            "calendar_metadata": cal_metadata,
+            "stats": {"total_exceptions": total_count},
             "template_type": "list"
         }
 
@@ -1645,6 +2093,7 @@ class XERAnalyzer:
                     "total_variance_days": 0.0,
                     "critical_count": 0,
                     "delayed_count": 0,
+                    "at_risk_count": 0,
                     "completed_count": 0,
                     "in_progress_count": 0,
                     "not_started_count": 0,
@@ -1661,9 +2110,14 @@ class XERAnalyzer:
             else:
                 b["not_started_count"] += 1
 
+            classification = a.get("classification", "ON_TRACK")
+            if classification == "DELAYED":
+                b["delayed_count"] += 1
+            elif classification == "AT_RISK":
+                b["at_risk_count"] += 1
+
             delay = a.get("delay_days") or 0
             if delay > 0 and status != "COMPLETED":
-                b["delayed_count"] += 1
                 b["total_variance_days"] += delay
 
             if a.get("is_critical_p6", False) and status != "COMPLETED":
@@ -1677,15 +2131,22 @@ class XERAnalyzer:
             total = b["activity_count"]
             if total == 0:
                 return "Empty"
+            completed = b["completed_count"]
+            if completed == total:
+                if b["total_variance_days"] <= 0:
+                    return "Performing"
+                else:
+                    return "Slipping"
             delayed_pct = b["delayed_count"] / total
+            at_risk_pct = b["at_risk_count"] / total
             critical_pct = b["critical_count"] / total
+            if delayed_pct > t["delayed_pct"]:
+                return "Slipping"
             if critical_pct > t["critical_pct"]:
                 return "Critical"
-            if delayed_pct > t["delayed_pct"]:
-                return "Delayed"
-            if delayed_pct > t["at_risk_delayed_pct"] or critical_pct > t["at_risk_critical_pct"]:
-                return "At Risk"
-            return "On Track"
+            if delayed_pct > t["at_risk_delayed_pct"] or at_risk_pct > t["at_risk_delayed_pct"] or critical_pct > t["at_risk_critical_pct"]:
+                return "Watch"
+            return "Performing"
 
         results = []
         for name, b in branch_data.items():
@@ -1695,12 +2156,17 @@ class XERAnalyzer:
             results.append(b)
 
         # Sort: Critical first, then by delayed count descending
-        status_order = {"Critical": 0, "Delayed": 1, "At Risk": 2, "On Track": 3, "Empty": 4}
-        results.sort(key=lambda x: (status_order.get(x["status_tag"], 9), -x["delayed_count"]))
+        status_order = {"Critical": 0, "Slipping": 1, "Watch": 2, "Performing": 3, "Empty": 4}
+        def get_order_key(tag: str) -> int:
+            if tag in status_order:
+                return status_order[tag]
+            return 9
+        results.sort(key=lambda x: (get_order_key(x["status_tag"]), -x["delayed_count"]))
 
         data_ref = self.data_store.store_result(results)
         total_acts = len(acts)
         total_delayed = sum(b["delayed_count"] for b in results)
+        total_at_risk = sum(b["at_risk_count"] for b in results)
         total_critical = sum(b["critical_count"] for b in results)
 
         return {
@@ -1716,6 +2182,7 @@ class XERAnalyzer:
                 "total_wbs_branches": len(results),
                 "total_project_activities": total_acts,
                 "total_delayed_activities": total_delayed,
+                "total_at_risk_activities": total_at_risk,
                 "total_critical_activities": total_critical,
                 "ev_available": False,
                 "ev_note": "Earned Value not configured. All activities use Duration % Complete (CP_Drtn). act_reg_cost is zero across all TASKRSRC rows. SPI/CPI cannot be computed from this XER.",
