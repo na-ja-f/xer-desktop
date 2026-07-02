@@ -808,6 +808,8 @@ class XERDataStore:
         df['is_critical_p6'] = df['float_hrs'] <= 0
         if 'path_id' not in df.columns:
             df['path_id'] = None
+        if 'float_path_order' not in df.columns:
+            df['float_path_order'] = None
 
         # 2.5. Unified Current Dates Logic
         def get_current_end_date(row):
@@ -1196,7 +1198,10 @@ class XERDataStore:
         execution_delayed_count = int((df['classification'] == 'DELAYED').sum())
         at_risk_count = int((df['float_risk'] == 'At Risk').sum())
         watching_count = int((df['float_risk'] == 'Watching').sum())
-        b039_critical_count = int(((df['status_enum'] != 'COMPLETED') & (df['float_hrs'] <= 0)).sum())
+        # B-042: Exclude milestones and LOE from critical count to match Activities screen logic.
+        # Primavera milestones always have 0 float and would massively inflate the count.
+        _working_task_mask = ~df['task_type'].isin(['TT_LOE', 'TT_WBS', 'TT_Mile', 'TT_FinMile'])
+        b039_critical_count = int(((df['status_enum'] != 'COMPLETED') & (df['float_hrs'] <= 0) & _working_task_mask).sum())
         completed_late_count = int((df['classification'] == 'COMPLETED_LATE').sum())
         on_track_count = total_tasks - execution_delayed_count - at_risk_count - watching_count - b039_critical_count
 
@@ -1237,7 +1242,7 @@ class XERDataStore:
                 "topRisks": top_neg_float[['task_code', 'task_name', 'float_hrs']].to_dict('records')
             },
             "activityAnalysis": self._inject_activity_codes(
-                df[['task_id', 'task_code', 'task_name', 'status_enum', 'delay_days', 'float_hrs', 'delay_float_category', 'is_critical_p6', 'path_id', 'is_predicted_date', '_dt_current_end_date', '_dt_current_start_date', 'classification', 'forecast_slip_days', 'threshold_days', 'bl_start_date', 'bl_finish_date', 'bl_float_days', 'float_consumed_pct', 'float_risk']].set_index('task_id').to_dict('index'),
+                df[['task_id', 'task_code', 'task_name', 'status_enum', 'delay_days', 'float_hrs', 'delay_float_category', 'is_critical_p6', 'path_id', 'float_path_order', 'is_predicted_date', '_dt_current_end_date', '_dt_current_start_date', 'classification', 'forecast_slip_days', 'threshold_days', 'bl_start_date', 'bl_finish_date', 'bl_float_days', 'float_consumed_pct', 'float_risk']].set_index('task_id').to_dict('index'),
                 source
             )
         }
@@ -2818,6 +2823,8 @@ class XERDataStore:
             activity_data = analysis.get("activityAnalysis", {})
 
             # ── Critical Path extraction ──
+            # Uses float_path_order from P6-native data (if available) for correct sequence.
+            # Falls back to chronological sort by Early Start for CPM-generated paths.
             longest_path_activities = []
             next_path_activities = []
             hpd = self.hours_per_day or 8.0
@@ -2826,8 +2833,8 @@ class XERDataStore:
                 fh = m.get("float_hrs", 0) or 0
                 fd = fh / hpd
                 path_id = m.get("path_id", None)
-                
-                # Default sorting date is very high if missing to keep them at the end
+                fp_order = m.get("float_path_order", None)
+
                 sort_start_val = pd.Timestamp.max
                 sort_end_val = pd.Timestamp.max
                 dt_start = m.get("_dt_current_start_date")
@@ -2836,41 +2843,59 @@ class XERDataStore:
                     sort_start_val = pd.to_datetime(dt_start)
                 if pd.notnull(dt_end):
                     sort_end_val = pd.to_datetime(dt_end)
-                    
+
                 entry = {
                     "task_code": m.get("task_code", ""),
                     "task_name": m.get("task_name", ""),
                     "float_days": round(fd, 1),
                     "status": m.get("status_enum", ""),
                     "start_date": sort_start_val,
-                    "end_date": sort_end_val
+                    "end_date": sort_end_val,
+                    "fp_order": float(fp_order) if fp_order is not None and not pd.isna(fp_order) else None
                 }
-                
-                if path_id == 1:
+
+                if path_id == 1 or path_id == 1.0:
                     longest_path_activities.append(entry)
-                elif path_id == 2:
+                elif path_id == 2 or path_id == 2.0:
                     next_path_activities.append(entry)
 
-            # Sort longest path chronologically by Early Start
-            longest_path_activities.sort(key=lambda x: x["start_date"])
-            
-            # Sort next path chronologically by Early Start
-            next_path_activities.sort(key=lambda x: x["start_date"])
-            
-            # Path Duration Calculation (Calendar Days between first start and last end)
+            # Sort by P6-native float_path_order if available, else chronologically
+            def sort_path(path_list):
+                has_order = any(a.get("fp_order") is not None for a in path_list)
+                if has_order:
+                    return sorted(path_list, key=lambda x: (x["fp_order"] if x["fp_order"] is not None else 9999))
+                return sorted(path_list, key=lambda x: x["start_date"])
+
+            longest_path_activities = sort_path(longest_path_activities)
+            next_path_activities = sort_path(next_path_activities)
+
+            # Path Duration: calendar days between first activity start and last activity finish
             def calc_path_duration(path_list):
                 if not path_list: return None
-                start = path_list[0]["start_date"]
-                end = path_list[-1]["end_date"]
-                if start == pd.Timestamp.max or end == pd.Timestamp.max: return None
-                return (end - start).days
+                valid_starts = [a["start_date"] for a in path_list if a["start_date"] != pd.Timestamp.max]
+                valid_ends = [a["end_date"] for a in path_list if a["end_date"] != pd.Timestamp.max]
+                if not valid_starts or not valid_ends: return None
+                return (max(valid_ends) - min(valid_starts)).days
 
             p1_dur = calc_path_duration(longest_path_activities)
             p2_dur = calc_path_duration(next_path_activities)
 
-            # Find worst float in each path
             p1_worst_float = min([a["float_days"] for a in longest_path_activities]) if longest_path_activities else None
             p2_worst_float = min([a["float_days"] for a in next_path_activities]) if next_path_activities else None
+
+            # Full path sequence payload for frontend "View Path" button
+            def make_sequence(path_list):
+                return [
+                    {
+                        "id": a["task_code"],
+                        "name": a["task_name"],
+                        "es": a["start_date"].strftime("%d %b %Y") if a["start_date"] != pd.Timestamp.max else None,
+                        "ef": a["end_date"].strftime("%d %b %Y") if a["end_date"] != pd.Timestamp.max else None,
+                        "float": a["float_days"],
+                        "status": a["status"]
+                    }
+                    for a in path_list
+                ]
 
             current_cp = {
                 "count": len(longest_path_activities),
@@ -2880,6 +2905,7 @@ class XERDataStore:
                 "first_activity_id": longest_path_activities[0]["task_code"] if longest_path_activities else None,
                 "last_activity": longest_path_activities[-1]["task_name"] if longest_path_activities else None,
                 "last_activity_id": longest_path_activities[-1]["task_code"] if longest_path_activities else None,
+                "path_sequence": make_sequence(longest_path_activities),
             }
 
             next_cp = {
@@ -2890,64 +2916,48 @@ class XERDataStore:
                 "first_activity_id": next_path_activities[0]["task_code"] if next_path_activities else None,
                 "last_activity": next_path_activities[-1]["task_name"] if next_path_activities else None,
                 "last_activity_id": next_path_activities[-1]["task_code"] if next_path_activities else None,
+                "path_sequence": make_sequence(next_path_activities),
             }
 
             # ── EVM from root WBS summary (B-034/035/036) ──
             wbs_tree = self.get_wbs_hierarchy(latest["id"], context=context)
-            bl_wbs_tree = self.get_wbs_hierarchy(baseline["id"], context=context)
 
             # Extract root-level EVM from update WBS
             root_summary = {}
             wbs_delay_list = []
 
-            def extract_root_evm(nodes):
-                """Walk tree, collecting Level-2 WBS summaries (children of root)."""
-                for node in nodes:
-                    s = node.get("summary", {})
-                    if s and node.get("children"):
-                        # This is a branch with children = a WBS grouping node
-                        extract_root_evm(node["children"])
-                    elif s:
-                        # Leaf WBS with activities — collect
-                        pass
-
-            # Simpler: get the root node's aggregated summary
             if wbs_tree.get("records"):
                 root = wbs_tree["records"][0] if wbs_tree["records"] else {}
                 root_summary = root.get("summary", {})
 
-                # Per-WBS delay: compare each level-2 WBS finish date
-                bl_wbs_map = {}
-                def map_bl_wbs(nodes):
+                def collect_wbs_delay(nodes, depth=0, parent_name=""):
                     for n in nodes:
                         s = n.get("summary", {})
-                        if s and s.get("early_finish"):
-                            bl_wbs_map[n.get("wbs_name", "")] = s.get("early_finish")
-                        if n.get("children"):
-                            map_bl_wbs(n["children"])
-
-                if bl_wbs_tree.get("records"):
-                    map_bl_wbs(bl_wbs_tree["records"])
-
-                def collect_wbs_delay(nodes, depth=0):
-                    for n in nodes:
-                        s = n.get("summary", {})
-                        name = n.get("wbs_name", "")
+                        leaf_name = n.get("wbs_name", "")
                         wbs_id = n.get("wbs_id", "")
                         up_finish = s.get("early_finish")
-                        bl_finish = bl_wbs_map.get(name)
+                        bl_finish = s.get("baseline_finish")
+                        working_delay = s.get("branch_variance_days", 0.0)
+
+                        # B-042: Planner-friendly display: "Parent > Child" format.
+                        # Avoids ambiguity when multiple WBS branches share the same leaf name
+                        # (e.g., 'SUBMITTALS' appears under every discipline).
+                        if parent_name:
+                            display_name = f"{parent_name} > {leaf_name}"
+                        else:
+                            display_name = leaf_name
 
                         if up_finish and bl_finish and depth >= 1:
                             try:
                                 up_dt = pd.to_datetime(up_finish)
                                 bl_dt = pd.to_datetime(bl_finish)
-                                d = (up_dt - bl_dt).days
+                                cal_delay = (up_dt - bl_dt).days
                                 act_count = s.get("activity_count", 0)
-                                
+
                                 if act_count and act_count > 0:
                                     status = "On Track"
-                                    if d > 0: status = "Behind Schedule"
-                                    elif d < 0: status = "Ahead of Schedule"
+                                    if working_delay > 0: status = "Behind Schedule"
+                                    elif working_delay < 0: status = "Ahead of Schedule"
 
                                     pct_complete = 0.0
                                     budget = s.get("budget_cost", 0)
@@ -2959,9 +2969,12 @@ class XERDataStore:
                                         pct_complete = round((comp / act_count) * 100, 1)
 
                                     wbs_delay_list.append({
-                                        "wbs": name,
+                                        "wbs": display_name,
+                                        "wbs_leaf": leaf_name,
                                         "wbs_id": wbs_id,
-                                        "delay": d,
+                                        "delay": cal_delay,
+                                        "delay_calendar_days": cal_delay,
+                                        "delay_working_days": working_delay,
                                         "activity_count": act_count,
                                         "bl_finish": bl_finish,
                                         "up_finish": up_finish,
@@ -2971,7 +2984,8 @@ class XERDataStore:
                             except:
                                 pass
                         if n.get("children"):
-                            collect_wbs_delay(n["children"], depth + 1)
+                            # Only use immediate leaf name as parent prefix (not full chain)
+                            collect_wbs_delay(n["children"], depth + 1, parent_name=leaf_name)
 
                 collect_wbs_delay(wbs_tree["records"])
 
@@ -2990,9 +3004,8 @@ class XERDataStore:
             pv_cost = root_summary.get("pv_cost")
             ev_cost = root_summary.get("ev_cost")
 
-            # Physical SV: physical progress vs planned progress
-            # If SPI exists, physical_sv ≈ (SPI - 1) * 100
-            physical_sv = round((spi - 1) * 100, 1) if spi is not None else None
+            # Schedule Performance % (Option A for Physical SV issue)
+            schedule_performance_pct = round((spi - 1) * 100, 1) if spi is not None else None
 
             return {
                 "mode": "WITH_UPDATE",
@@ -3000,7 +3013,7 @@ class XERDataStore:
                 "baseline_finish": baseline_finish,
                 "delay_days": delay_days,
                 "cost_sv": round(cost_sv, 2) if cost_sv is not None else None,
-                "physical_sv": physical_sv,
+                "schedule_performance_pct": schedule_performance_pct,
                 "pv_cost": round(pv_cost, 2) if pv_cost is not None else None,
                 "ev_cost": round(ev_cost, 2) if ev_cost is not None else None,
                 "spi": spi,

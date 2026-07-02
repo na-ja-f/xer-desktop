@@ -316,6 +316,11 @@ class CPMScheduler:
                 cal_map, data_date, plan_end_date
             )
 
+        # ----------------------------------------------------------------
+        # STEP 3 — Multiple Float Path Trace (Runs unconditionally)
+        # ----------------------------------------------------------------
+        tasks = self._calculate_multiple_float_paths(tasks, relationships_df, cal_map)
+
         return tasks
 
     # ------------------------------------------------------------------
@@ -633,73 +638,6 @@ class CPMScheduler:
                 final_tf = round(float(tf_days), 2)
             final_tf_map[tid] = final_tf
 
-        # ---- Multiple Float Path Trace ----
-        path_ids = {tid: None for tid in task_ids}
-        if task_ids and EF:
-            max_ef_val = max(EF.values())
-            
-            # --- Path 1: Longest Path ---
-            # Start trace from activities defining the project end date
-            path1_terminals = [tid for tid in task_ids if EF[tid] == max_ef_val]
-            
-            visited_p1 = set()
-            queue_p1 = path1_terminals.copy()
-            
-            while queue_p1:
-                curr_id = queue_p1.pop(0)
-                if curr_id in visited_p1:
-                    continue
-                visited_p1.add(curr_id)
-                path_ids[curr_id] = 1
-                
-                curr_es = ES[curr_id]
-                
-                for pid, rtype, lag in predecessors[curr_id]:
-                    candidate_es = self._forward_constraint(
-                        rtype, lag, ES[pid], EF[pid], dur[curr_id], cal_map, cal_id_map[curr_id]
-                    )
-                    # A predecessor is driving if its forward constraint exactly dictates the successor's Early Start
-                    if abs((candidate_es - curr_es).total_seconds()) < 3600:  # Within 1 hour tolerance
-                        if pid not in visited_p1:
-                            queue_p1.append(pid)
-
-            # --- Path 2: Next Critical Path ---
-            # Find the activity with the lowest total float that is NOT on Path 1
-            min_float_p2 = float('inf')
-            path2_seed = None
-            
-            for tid in task_ids:
-                if path_ids[tid] != 1:
-                    tf = final_tf_map[tid]
-                    if tf < min_float_p2:
-                        min_float_p2 = tf
-                        path2_seed = tid
-            
-            if path2_seed:
-                visited_p2 = set()
-                queue_p2 = [path2_seed]
-                
-                while queue_p2:
-                    curr_id = queue_p2.pop(0)
-                    if curr_id in visited_p2:
-                        continue
-                    visited_p2.add(curr_id)
-                    path_ids[curr_id] = 2
-                    
-                    curr_es = ES[curr_id]
-                    
-                    for pid, rtype, lag in predecessors[curr_id]:
-                        # Only follow driving predecessors that aren't already on Path 1
-                        if path_ids[pid] == 1:
-                            continue
-                            
-                        candidate_es = self._forward_constraint(
-                            rtype, lag, ES[pid], EF[pid], dur[curr_id], cal_map, cal_id_map[curr_id]
-                        )
-                        if abs((candidate_es - curr_es).total_seconds()) < 3600:
-                            if pid not in visited_p2:
-                                queue_p2.append(pid)
-
         # ---- Output ----
         def fmt(dt: Optional[datetime]) -> Optional[str]:
             if dt is None:
@@ -721,12 +659,204 @@ class CPMScheduler:
                 'early_finish': fmt(ef),
                 'late_start': fmt(ls),
                 'late_finish': fmt(lf),
-                'total_float': final_tf_map[tid],
-                'path_id': path_ids[tid]
+                'total_float': final_tf_map[tid]
             })
 
         results_df = pd.DataFrame(results)
         return tasks.merge(results_df, on='task_id', how='left')
+
+    def _calculate_multiple_float_paths(
+        self,
+        tasks: pd.DataFrame,
+        relationships_df: pd.DataFrame,
+        cal_map: Dict[str, P6Calendar]
+    ) -> pd.DataFrame:
+        """Runs Multiple Float Path tracing using dates mapped from P6 or CPM."""
+        if tasks.empty:
+            return tasks
+
+        rels = relationships_df.copy() if not relationships_df.empty else pd.DataFrame(
+            columns=['task_id', 'pred_task_id', 'pred_type', 'lag_hr_cnt']
+        )
+
+        task_ids = list(tasks['task_id'].unique())
+        tid_set = set(task_ids)
+
+        dur: Dict[str, float] = {}
+        cal_id_map: Dict[str, Any] = {}
+        for _, row in tasks.iterrows():
+            tid = row['task_id']
+            dur_hr = pd.to_numeric(row.get('target_drtn_hr_cnt', row.get('remain_drtn_hr_cnt', 0)), errors='coerce')
+            if pd.isna(dur_hr): dur_hr = 0.0
+            cid = row.get('clndr_id', '')
+            cal = self._get_calendar(cal_map, cid)
+            cal_id_map[tid] = cid
+            hpd = cal.hours_per_day if cal.hours_per_day > 0 else self.hours_per_day
+            dur[tid] = float(dur_hr / hpd)
+
+        predecessors: Dict[str, List] = {tid: [] for tid in task_ids}
+        if not rels.empty and 'lag_hr_cnt' in rels.columns:
+            rels['lag_days'] = pd.to_numeric(rels['lag_hr_cnt'], errors='coerce').fillna(0) / self.hours_per_day
+            for _, row in rels.iterrows():
+                sid = row['task_id']
+                pid = row['pred_task_id']
+                rtype = row.get('pred_type', 'PR_FS')
+                lag = float(row.get('lag_days', 0.0))
+                if sid in tid_set and pid in tid_set:
+                    predecessors[sid].append((pid, rtype, lag))
+
+        # Reconstruct ES, EF as datetimes
+        ES: Dict[str, datetime] = {}
+        EF: Dict[str, datetime] = {}
+        final_tf_map: Dict[str, float] = {}
+        
+        for _, row in tasks.iterrows():
+            tid = row['task_id']
+            tf = pd.to_numeric(row.get('total_float'), errors='coerce')
+            final_tf_map[tid] = float(tf) if not pd.isna(tf) else 0.0
+            
+            es_str = row.get('early_start')
+            ef_str = row.get('early_finish')
+            try:
+                es_dt = pd.to_datetime(es_str).to_pydatetime() if pd.notnull(es_str) else datetime(2000, 1, 1)
+                ef_dt = pd.to_datetime(ef_str).to_pydatetime() if pd.notnull(ef_str) else datetime(2000, 1, 1)
+            except Exception:
+                es_dt = datetime(2000, 1, 1)
+                ef_dt = datetime(2000, 1, 1)
+            ES[tid] = es_dt
+            EF[tid] = ef_dt
+
+        # ─────────────────────────────────────────────────────────────────
+        # PRIMARY: Use Primavera's native float_path / float_path_order data.
+        # P6 exports these in the TASK table after running Multiple Float Path
+        # scheduling. float_path = path number (1 = longest/critical),
+        # float_path_order = sequence within that path.
+        # These are identical to what Primavera shows in its Schedule tab.
+        # ─────────────────────────────────────────────────────────────────
+        if 'float_path' in tasks.columns:
+            fp_col = pd.to_numeric(tasks['float_path'], errors='coerce')
+            fpo_col = pd.to_numeric(
+                tasks['float_path_order'] if 'float_path_order' in tasks.columns
+                else pd.Series([None] * len(tasks)),
+                errors='coerce'
+            )
+
+            # Only use P6 data if it is actually populated (>0 non-null values)
+            p6_populated = fp_col.dropna()
+            p6_populated = p6_populated[p6_populated > 0]
+
+            if len(p6_populated) > 0:
+                path_df = tasks[['task_id']].copy()
+                path_df['path_id'] = fp_col
+                path_df['float_path_order'] = fpo_col
+
+                cols_to_drop = [c for c in ['path_id', 'float_path_order'] if c in tasks.columns]
+                if cols_to_drop:
+                    tasks = tasks.drop(columns=cols_to_drop)
+
+                return tasks.merge(
+                    path_df[['task_id', 'path_id', 'float_path_order']],
+                    on='task_id', how='left'
+                )
+
+        # ─────────────────────────────────────────────────────────────────
+        # FALLBACK: Robust backward trace when P6 fields are absent.
+        # Avoids the previous 1-hour fixed tolerance that broke across
+        # mixed calendars. Uses one working day as the driving tolerance
+        # so that lag arithmetic across different calendars still resolves
+        # correctly (e.g., Fri → Mon under a 5-day calendar).
+        # ─────────────────────────────────────────────────────────────────
+        path_ids: Dict[str, Any] = {tid: None for tid in task_ids}
+        path_orders: Dict[str, Any] = {tid: None for tid in task_ids}
+
+        if task_ids and EF:
+            valid_efs = [dt for dt in EF.values() if dt.year > 2002]
+            max_ef_val = max(valid_efs) if valid_efs else None
+
+            if max_ef_val:
+                # ── Path 1: Longest Path (backward trace from project finish) ──
+                path1_terminals = [tid for tid in task_ids if EF[tid] >= max_ef_val - timedelta(hours=1)]
+
+                visited_p1: Set[str] = set()
+                queue_p1 = path1_terminals.copy()
+                ordered_p1 = []
+
+                while queue_p1:
+                    curr_id = queue_p1.pop(0)
+                    if curr_id in visited_p1:
+                        continue
+                    visited_p1.add(curr_id)
+                    path_ids[curr_id] = 1
+                    ordered_p1.append(curr_id)
+
+                    curr_es = ES[curr_id]
+                    curr_cal = self._get_calendar(cal_map, cal_id_map[curr_id])
+                    # Calendar-aware tolerance: one working day in seconds
+                    tolerance_secs = curr_cal.hours_per_day * 3600
+
+                    for pid, rtype, lag in predecessors[curr_id]:
+                        if pid in visited_p1:
+                            continue
+                        candidate_es = self._forward_constraint(
+                            rtype, lag, ES[pid], EF[pid], dur[curr_id], cal_map, cal_id_map[curr_id]
+                        )
+                        if abs((candidate_es - curr_es).total_seconds()) <= tolerance_secs:
+                            queue_p1.append(pid)
+
+                # Assign order (chronological: project start = 1)
+                for i, tid in enumerate(reversed(ordered_p1)):
+                    path_orders[tid] = i + 1
+
+                # ── Path 2+: Next Critical Paths ──
+                path_num = 2
+                for _safety in range(49):  # Max 50 paths total
+                    remaining = [tid for tid in task_ids if path_ids[tid] is None]
+                    if not remaining:
+                        break
+
+                    # Seed from task with minimum float among unassigned
+                    seed_id = min(remaining, key=lambda t: final_tf_map[t])
+
+                    visited_pn: Set[str] = set()
+                    queue_pn = [seed_id]
+                    ordered_pn = []
+
+                    while queue_pn:
+                        curr_id = queue_pn.pop(0)
+                        if curr_id in visited_pn or path_ids[curr_id] is not None:
+                            continue
+                        visited_pn.add(curr_id)
+                        path_ids[curr_id] = path_num
+                        ordered_pn.append(curr_id)
+
+                        curr_es = ES[curr_id]
+                        curr_cal = self._get_calendar(cal_map, cal_id_map[curr_id])
+                        tolerance_secs = curr_cal.hours_per_day * 3600
+
+                        for pid, rtype, lag in predecessors[curr_id]:
+                            if path_ids[pid] is not None or pid in visited_pn:
+                                continue
+                            candidate_es = self._forward_constraint(
+                                rtype, lag, ES[pid], EF[pid], dur[curr_id], cal_map, cal_id_map[curr_id]
+                            )
+                            if abs((candidate_es - curr_es).total_seconds()) <= tolerance_secs:
+                                queue_pn.append(pid)
+
+                    for i, tid in enumerate(reversed(ordered_pn)):
+                        path_orders[tid] = i + 1
+
+                    if not visited_pn:
+                        break
+                    path_num += 1
+
+        path_df = pd.DataFrame([
+            {'task_id': tid, 'path_id': pid, 'float_path_order': path_orders.get(tid)}
+            for tid, pid in path_ids.items()
+        ])
+        cols_to_drop = [c for c in ['path_id', 'float_path_order'] if c in tasks.columns]
+        if cols_to_drop:
+            tasks = tasks.drop(columns=cols_to_drop)
+        return tasks.merge(path_df, on='task_id', how='left')
 
     # ------------------------------------------------------------------
     # Relationship Logic Helpers

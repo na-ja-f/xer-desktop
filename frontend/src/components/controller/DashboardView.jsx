@@ -84,65 +84,112 @@ const KPITile = ({ title, value, subtitle, icon: Icon, color = 'blue', badge, ba
 
 // ── Critical Path Card ──────────────────────────────────────────────────────
 const CriticalPathCard = ({ title, icon: Icon, data, color = 'red' }) => {
+  const [showPath, setShowPath] = useState(false);
   const borderColor = color === 'red' ? 'border-red-200' : 'border-amber-200';
   const headerBg = color === 'red' ? 'bg-red-50' : 'bg-amber-50';
   const headerText = color === 'red' ? 'text-red-800' : 'text-amber-800';
   const iconColor = color === 'red' ? 'text-red-600' : 'text-amber-600';
+  const accentColor = color === 'red' ? 'text-red-600 bg-red-50 border-red-100' : 'text-amber-600 bg-amber-50 border-amber-100';
+
+  const floatColor = (f) => {
+    if (f < 0) return 'text-red-700 bg-red-50 border-red-200';
+    if (f === 0) return 'text-amber-700 bg-amber-50 border-amber-200';
+    return 'text-emerald-700 bg-emerald-50 border-emerald-200';
+  };
 
   return (
     <div className={`bg-white border ${borderColor} rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-all`}>
-      <div className={`${headerBg} px-5 py-3 border-b ${borderColor} flex items-center gap-2.5`}>
-        <Icon size={16} className={iconColor} />
-        <h3 className={`text-[11px] font-black uppercase tracking-widest ${headerText}`}>{title}</h3>
+      <div className={`${headerBg} px-5 py-3 border-b ${borderColor} flex items-center justify-between`}>
+        <div className="flex items-center gap-2.5">
+          <Icon size={16} className={iconColor} />
+          <h3 className={`text-[11px] font-black uppercase tracking-widest ${headerText}`}>{title}</h3>
+        </div>
+        {data && data.path_sequence && data.path_sequence.length > 0 && (
+          <button
+            onClick={() => setShowPath(!showPath)}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[9px] font-black uppercase tracking-widest border transition-all ${
+              showPath
+                ? `${accentColor} opacity-80`
+                : 'text-gray-500 bg-white border-gray-200 hover:border-gray-300'
+            }`}
+          >
+            <ChevronRight size={10} className={`transition-transform ${showPath ? 'rotate-90' : ''}`} />
+            {showPath ? 'Hide Path' : `View Path (${data.path_sequence.length})`}
+          </button>
+        )}
       </div>
       <div className="p-5">
         {data ? (
-          <div className="grid grid-cols-3 gap-3">
-            {data.count !== undefined && (
-              <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Activities</p>
-                <p className="text-lg font-black text-gray-900">{data.count}</p>
-              </div>
-            )}
-            {data.duration !== undefined && data.duration !== null && (
-              <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Path Duration</p>
-                <p className="text-lg font-black text-gray-900">{data.duration}d</p>
-              </div>
-            )}
-            {data.worst_float !== undefined && data.worst_float !== null && (
-              <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Worst Float</p>
-                <p className={`text-lg font-black ${data.worst_float < 0 ? 'text-red-700' : 'text-gray-900'}`}>
-                  {data.worst_float > 0 ? '+' : ''}{data.worst_float}d
+          <>
+            <div className="grid grid-cols-3 gap-3">
+              {data.count !== undefined && (
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Activities</p>
+                  <p className="text-lg font-black text-gray-900">{data.count}</p>
+                </div>
+              )}
+              {data.duration !== undefined && data.duration !== null && (
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Path Duration</p>
+                  <p className="text-lg font-black text-gray-900">{data.duration}d</p>
+                </div>
+              )}
+              {data.worst_float !== undefined && data.worst_float !== null && (
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Worst Float</p>
+                  <p className={`text-lg font-black ${data.worst_float < 0 ? 'text-red-700' : 'text-gray-900'}`}>
+                    {data.worst_float > 0 ? '+' : ''}{data.worst_float}d
+                  </p>
+                </div>
+              )}
+              {data.min_float !== undefined && data.min_float !== null && (
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Min Float</p>
+                  <p className="text-lg font-black text-amber-700">{data.min_float > 0 ? '+' : ''}{data.min_float}d</p>
+                </div>
+              )}
+              {data.first_activity && (
+                <div className="col-span-3 bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">First Activity</p>
+                  <p className="text-[11px] font-bold text-gray-800 truncate" title={data.first_activity}>
+                    <span className="text-blue-600 font-mono mr-1">{data.first_activity_id}</span>
+                    {data.first_activity}
+                  </p>
+                </div>
+              )}
+              {data.last_activity && (
+                <div className="col-span-3 bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Last Activity</p>
+                  <p className="text-[11px] font-bold text-gray-800 truncate" title={data.last_activity}>
+                    <span className="text-blue-600 font-mono mr-1">{data.last_activity_id}</span>
+                    {data.last_activity}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* ── Expandable Path Sequence ── */}
+            {showPath && data.path_sequence && data.path_sequence.length > 0 && (
+              <div className="mt-4 border-t border-gray-100 pt-4">
+                <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-3">
+                  Full Path Sequence — {data.path_sequence.length} Activities
                 </p>
+                <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                  {data.path_sequence.map((act, i) => (
+                    <div key={i} className="flex items-center gap-2 py-1.5 px-2.5 rounded-lg hover:bg-gray-50 transition-colors group">
+                      <span className="text-[9px] font-black text-gray-300 w-5 shrink-0 text-right">{i + 1}</span>
+                      <span className="text-[9px] font-mono font-bold text-blue-600 shrink-0 w-28 truncate">{act.id}</span>
+                      <span className="text-[10px] font-semibold text-gray-700 flex-1 truncate" title={act.name}>{act.name}</span>
+                      <span className="text-[9px] text-gray-400 shrink-0 hidden group-hover:block">{act.es} → {act.ef}</span>
+                      <span className={`text-[8px] font-black px-1.5 py-0.5 rounded border shrink-0 ${floatColor(act.float)}`}>
+                        {act.float > 0 ? '+' : ''}{act.float}d
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
-            {data.min_float !== undefined && data.min_float !== null && (
-              <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Min Float</p>
-                <p className="text-lg font-black text-amber-700">{data.min_float > 0 ? '+' : ''}{data.min_float}d</p>
-              </div>
-            )}
-            {data.first_activity && (
-              <div className="col-span-3 bg-gray-50 rounded-lg p-3 border border-gray-100">
-                <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">First Activity</p>
-                <p className="text-[11px] font-bold text-gray-800 truncate" title={data.first_activity}>
-                  <span className="text-blue-600 font-mono mr-1">{data.first_activity_id}</span>
-                  {data.first_activity}
-                </p>
-              </div>
-            )}
-            {data.last_activity && (
-              <div className="col-span-3 bg-gray-50 rounded-lg p-3 border border-gray-100">
-                <p className="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Last Activity</p>
-                <p className="text-[11px] font-bold text-gray-800 truncate" title={data.last_activity}>
-                  <span className="text-blue-600 font-mono mr-1">{data.last_activity_id}</span>
-                  {data.last_activity}
-                </p>
-              </div>
-            )}
-          </div>
+          </>
         ) : (
           <p className="text-sm text-gray-400 font-medium italic">No data available</p>
         )}
@@ -152,6 +199,7 @@ const CriticalPathCard = ({ title, icon: Icon, data, color = 'red' }) => {
 };
 
 // ── Main Dashboard View ─────────────────────────────────────────────────────
+
 const DashboardView = ({ context = 'controller' }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -251,9 +299,9 @@ const DashboardView = ({ context = 'controller' }) => {
     ? `${data.cost_sv >= 0 ? '+' : ''}$${formatCurrency(data.cost_sv)}`
     : 'Not Available';
 
-  const physSvColor = (data.physical_sv ?? 0) >= 0 ? 'green' : 'red';
-  const physSvDisplay = data.physical_sv !== null && data.physical_sv !== undefined
-    ? `${data.physical_sv >= 0 ? '+' : ''}${data.physical_sv}%`
+  const physSvColor = (data.schedule_performance_pct ?? 0) >= 0 ? 'green' : 'red';
+  const physSvDisplay = data.schedule_performance_pct !== null && data.schedule_performance_pct !== undefined
+    ? `${data.schedule_performance_pct >= 0 ? '+' : ''}${data.schedule_performance_pct}%`
     : 'Not Available';
 
   const spiColor = data.spi >= 0.95 ? 'green' : data.spi >= 0.85 ? 'amber' : data.spi !== null ? 'red' : 'slate';
@@ -307,9 +355,9 @@ const DashboardView = ({ context = 'controller' }) => {
           color={svColor}
         />
         <KPITile
-          title="Physical SV"
+          title="Schedule Performance %"
           value={physSvDisplay}
-          icon={data.physical_sv >= 0 ? ArrowUpRight : ArrowDownRight}
+          icon={data.schedule_performance_pct >= 0 ? ArrowUpRight : ArrowDownRight}
           color={physSvColor}
         />
         <KPITile
@@ -389,7 +437,7 @@ const DashboardView = ({ context = 'controller' }) => {
                   <th className="text-left px-5 py-2.5 text-[9px] font-black text-gray-400 uppercase tracking-widest">WBS Branch</th>
                   <th className="text-right px-5 py-2.5 text-[9px] font-black text-gray-400 uppercase tracking-widest">Baseline Finish</th>
                   <th className="text-right px-5 py-2.5 text-[9px] font-black text-gray-400 uppercase tracking-widest">Forecast Finish</th>
-                  <th className="text-right px-5 py-2.5 text-[9px] font-black text-gray-400 uppercase tracking-widest">Delay</th>
+                  <th className="text-right px-5 py-2.5 text-[9px] font-black text-gray-400 uppercase tracking-widest">Delay (Working Days)</th>
                   <th className="text-center px-5 py-2.5 text-[9px] font-black text-gray-400 uppercase tracking-widest">Status</th>
                   <th className="text-right px-5 py-2.5 text-[9px] font-black text-gray-400 uppercase tracking-widest">% Complete</th>
                   <th className="text-right px-5 py-2.5 text-[9px] font-black text-gray-400 uppercase tracking-widest">Activities</th>
@@ -408,14 +456,14 @@ const DashboardView = ({ context = 'controller' }) => {
                     <td className="px-5 py-3 text-right text-[11px] font-mono text-gray-500">{formatDate(row.up_finish)}</td>
                     <td className="px-5 py-3 text-right">
                       <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-black ${
-                        row.delay > 0
+                        row.delay_working_days > 0
                           ? 'bg-red-50 text-red-700 border border-red-200'
-                          : row.delay < 0
+                          : row.delay_working_days < 0
                           ? 'bg-green-50 text-green-700 border border-green-200'
                           : 'bg-gray-50 text-gray-600 border border-gray-200'
                       }`}>
-                        {row.delay > 0 ? <ArrowUpRight size={12} /> : row.delay < 0 ? <ArrowDownRight size={12} /> : null}
-                        {row.delay > 0 ? '+' : ''}{row.delay}d
+                        {row.delay_working_days > 0 ? <ArrowUpRight size={12} /> : row.delay_working_days < 0 ? <ArrowDownRight size={12} /> : null}
+                        {row.delay_working_days > 0 ? '+' : ''}{row.delay_working_days}d
                       </span>
                     </td>
                     <td className="px-5 py-3 text-center">
