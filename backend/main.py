@@ -12,6 +12,8 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
 
 from modules.extractor import CompleteXERExtractor
 from modules.analyzer import XERAnalyzer
+from modules.db import init_db
+from modules.findings import write_findings_for_version
 
 app = FastAPI()
 
@@ -24,6 +26,7 @@ app.add_middleware(
 )
 
 analyzer = XERAnalyzer()
+init_db()
 
 @app.get("/")
 def read_root():
@@ -148,7 +151,13 @@ async def upload_xer(
             context=context
         )
         print(f"Version added: {version_id} ({data['project']['project_name']})")
-            
+
+        try:
+            written = write_findings_for_version(analyzer.data_store, version_id, context, file_type)
+            print(f"DS7 findings written: {written}")
+        except Exception as e:
+            print(f"WARNING: DS7 findings write failed: {e}")
+
         stats = analyzer.get_basic_stats(context=context)
         os.remove(temp_path)
         return {"success": True, "stats": stats, "version_id": version_id}

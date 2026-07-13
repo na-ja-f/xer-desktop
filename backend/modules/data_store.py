@@ -1068,32 +1068,43 @@ class XERDataStore:
         
         # Check 5: Hard Constraints
         hard_constraints = ['CS_MNET', 'CS_MSEO', 'CS_MSON', 'CS_MFON'] # Must Start On, Must Finish On, etc.
-        hard_const_count = len(incomplete_tasks[incomplete_tasks['cstr_type'].isin(hard_constraints)])
+        hard_const_tasks = incomplete_tasks[incomplete_tasks['cstr_type'].isin(hard_constraints)]
+        hard_const_count = len(hard_const_tasks)
+        hard_const_ids = hard_const_tasks['task_code'].tolist()
         pt5_val = (hard_const_count / total_incomplete * 100) if total_incomplete > 0 else 0
-        
+
         # Check 6: High Float (> 44 days)
         high_float_threshold = 44 * self.hours_per_day
-        high_float_count = len(incomplete_tasks[incomplete_tasks['float_hrs'] > high_float_threshold])
+        high_float_tasks = incomplete_tasks[incomplete_tasks['float_hrs'] > high_float_threshold]
+        high_float_count = len(high_float_tasks)
+        high_float_ids = high_float_tasks['task_code'].tolist()
         pt6_val = (high_float_count / total_incomplete * 100) if total_incomplete > 0 else 0
-        
+
         # Check 7: Negative Float
-        neg_float_count = len(incomplete_tasks[incomplete_tasks['float_hrs'] < 0])
+        neg_float_tasks = incomplete_tasks[incomplete_tasks['float_hrs'] < 0]
+        neg_float_count = len(neg_float_tasks)
+        neg_float_ids = neg_float_tasks['task_code'].tolist()
         pt7_val = (neg_float_count / total_incomplete * 100) if total_incomplete > 0 else 0
-        
+
         # Check 8: High Duration (> 44 days)
         # We use target_drtn_hr_cnt as it represents Planned Duration in most XER exports
         dur_col = 'target_drtn_hr_cnt' if 'target_drtn_hr_cnt' in df.columns else 'orig_dur_hr_cnt'
         high_dur_threshold = 44 * self.hours_per_day
-        
+
         if dur_col in incomplete_tasks.columns:
-            high_dur_count = len(incomplete_tasks[pd.to_numeric(incomplete_tasks[dur_col], errors='coerce').fillna(0) > high_dur_threshold])
+            high_dur_tasks = incomplete_tasks[pd.to_numeric(incomplete_tasks[dur_col], errors='coerce').fillna(0) > high_dur_threshold]
+            high_dur_count = len(high_dur_tasks)
+            high_dur_ids = high_dur_tasks['task_code'].tolist()
         else:
             high_dur_count = 0
-            
+            high_dur_ids = []
+
         pt8_val = (high_dur_count / total_incomplete * 100) if total_incomplete > 0 else 0
 
         # Check 11: Missed Tasks (% of completed tasks with late finish)
-        missed_count = len(df[(df['status_enum'] == 'COMPLETED') & (df['delay_days'] > 0)])
+        missed_tasks = df[(df['status_enum'] == 'COMPLETED') & (df['delay_days'] > 0)]
+        missed_count = len(missed_tasks)
+        missed_ids = missed_tasks['task_code'].tolist()
         total_completed = len(df[df['status_enum'] == 'COMPLETED'])
         pt11_val = (missed_count / total_completed * 100) if total_completed > 0 else 0
 
@@ -1144,13 +1155,13 @@ class XERDataStore:
             {"id": 2, "name": "Leads", "measure": "% links with Negative Lag", "val": float(pt2_val), "threshold": "0%", "status": bool(pt2_val == 0)},
             {"id": 3, "name": "Lags", "measure": "% links with Positive Lag", "val": float(pt3_val), "threshold": "<= 5%", "status": bool(pt3_val <= 5)},
             {"id": 4, "name": "Rel Types", "measure": "% Finish-to-Start relationships", "val": float(pt4_val), "threshold": ">= 90%", "status": bool(pt4_val >= 90)},
-            {"id": 5, "name": "Hard Constraints", "measure": "% tasks with mandatory constraints", "val": float(pt5_val), "threshold": "<= 5%", "status": bool(pt5_val <= 5)},
-            {"id": 6, "name": "High Float", "measure": "% tasks with float > 44 days", "val": float(pt6_val), "threshold": "<= 5%", "status": bool(pt6_val <= 5)},
-            {"id": 7, "name": "Negative Float", "measure": "% tasks with negative float", "val": float(pt7_val), "threshold": "0%", "status": bool(pt7_val == 0)},
-            {"id": 8, "name": "High Duration", "measure": "% tasks with duration > 44 days", "val": float(pt8_val), "threshold": "<= 5%", "status": bool(pt8_val <= 5)},
+            {"id": 5, "name": "Hard Constraints", "measure": "% tasks with mandatory constraints", "val": float(pt5_val), "threshold": "<= 5%", "status": bool(pt5_val <= 5), "affected_count": hard_const_count, "affected_ids": hard_const_ids},
+            {"id": 6, "name": "High Float", "measure": "% tasks with float > 44 days", "val": float(pt6_val), "threshold": "<= 5%", "status": bool(pt6_val <= 5), "affected_count": high_float_count, "affected_ids": high_float_ids},
+            {"id": 7, "name": "Negative Float", "measure": "% tasks with negative float", "val": float(pt7_val), "threshold": "0%", "status": bool(pt7_val == 0), "affected_count": neg_float_count, "affected_ids": neg_float_ids},
+            {"id": 8, "name": "High Duration", "measure": "% tasks with duration > 44 days", "val": float(pt8_val), "threshold": "<= 5%", "status": bool(pt8_val <= 5), "affected_count": high_dur_count, "affected_ids": high_dur_ids},
             {"id": 9, "name": "Invalid Dates", "measure": "Dates inconsistent with Data Date", "val": 0.0, "threshold": "0%", "status": True},
             {"id": 10, "name": "Resources", "measure": "Tasks with assigned resources", "val": 100.0, "threshold": "100%", "status": True},
-            {"id": 11, "name": "Missed Tasks", "measure": "% completed tasks finished late", "val": float(pt11_val), "threshold": "<= 5%", "status": bool(pt11_val <= 5)},
+            {"id": 11, "name": "Missed Tasks", "measure": "% completed tasks finished late", "val": float(pt11_val), "threshold": "<= 5%", "status": bool(pt11_val <= 5), "affected_count": missed_count, "affected_ids": missed_ids},
             {"id": 12, "name": "Critical Path", "measure": "Continuous path integrity", "val": 100.0, "threshold": "Required", "status": bool(critical_count > 0)},
             {"id": 13, "name": "CPLI", "measure": "Critical Path Length Index", "val": float(pt13_val), "threshold": ">= 0.95", "status": bool(pt13_val >= 0.95)},
             {"id": 14, "name": "Baseline", "measure": "Project baseline assignment", "val": 100.0, "threshold": "Required", "status": bool(baseline_map)}
