@@ -1,93 +1,146 @@
-import React from 'react';
-import { ListTree } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import axios from 'axios';
 
-const AssessmentTable = ({ stats }) => {
-  if (!stats?.delay_matrix?.assessment) return null;
+const DISPLAY_NAMES = {
+  1: 'Missing logic',
+  2: 'Leads',
+  3: 'Lags',
+  4: 'Relationship types',
+  5: 'Hard constraints',
+  6: 'High float',
+  7: 'Negative float',
+  8: 'High duration',
+  9: 'Invalid dates',
+  10: 'Resources',
+  11: 'Missed tasks',
+  12: 'Critical path',
+  13: 'CPLI',
+};
+
+const BAND_CLASSES = {
+  pass: 'bg-[#D1FAE5] text-[#047857]',
+  warn: 'bg-[#FEF3C7] text-[#B45309]',
+  fail: 'bg-[#FEE2E2] text-[#B91C1C]',
+};
+
+const getBand = (point) => {
+  if (point.status_text === 'PASS' || point.status === true) return 'pass';
+  if (point.status_text === 'WARNING') return 'warn';
+  return 'fail';
+};
+
+const formatValue = (point) => {
+  if (point.id === 13) return point.val.toFixed(3);
+  if ([1, 9, 10, 12].includes(point.id)) {
+    return point.status_text || (point.status ? 'Pass' : 'Fail');
+  }
+  return typeof point.val === 'number' ? point.val.toFixed(1) + '%' : point.val;
+};
+
+const BAND_STROKE = {
+  pass: '#047857',
+  warn: '#B45309',
+  fail: '#B91C1C',
+};
+
+const Sparkline = ({ values, band }) => {
+  const w = 56, h = 16, pad = 1;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const points = values.map((v, i) => {
+    const x = pad + (i / (values.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((v - min) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
 
   return (
-    <div className="mb-10 bg-gray-900 rounded-[2.5rem] border border-white/10 shadow-2xl overflow-hidden">
-      <div className="p-8 border-b border-white/5 flex items-center justify-between bg-gray-900/50 backdrop-blur-md sticky top-0 z-20">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
-            <ListTree size={20} className="text-white" />
-          </div>
-          <div>
-            <h3 className="text-xl font-black text-white tracking-tight">Assessment Parameters & Scoring</h3>
-            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Forensic quality methodology (DCMA-14 Standard)</p>
-          </div>
+    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className="shrink-0">
+      <polyline
+        points={points}
+        fill="none"
+        stroke={BAND_STROKE[band]}
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+};
+
+const AssessmentTable = ({ stats }) => {
+  const [history, setHistory] = useState({});
+
+  const fetchHistory = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/findings/history?context=audit');
+      setHistory(res.data.history || {});
+    } catch (err) {
+      console.error('Failed to fetch DCMA findings history', err);
+      setHistory({});
+    }
+  }, []);
+
+  useEffect(() => {
+    if (stats?.delay_matrix?.assessment) fetchHistory();
+  }, [fetchHistory, stats]);
+
+  if (!stats?.delay_matrix?.assessment) return null;
+
+  const points = stats.delay_matrix.assessment.filter(p => p.id !== 14);
+
+  return (
+    <div className="mb-10">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[13px] font-semibold uppercase tracking-wider text-slate-600">
+          DCMA 14-Point Assessment
         </div>
-        <div className="px-5 py-2.5 bg-gray-800 rounded-2xl border border-white/5">
-          <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest mr-3">Status:</span>
-          <span className={`text-xs font-black uppercase tracking-tighter ${stats.delay_matrix.healthMetrics?.projectHealthScore > 80 ? 'text-green-400' : 'text-orange-400'}`}>
-            {stats.delay_matrix.healthMetrics?.healthStatus} Quality
-          </span>
-        </div>
+        <div className="text-xs text-teal-700 cursor-default select-none">View detail →</div>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-white/5">
-              <th className="px-8 py-5 text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-white/5">#</th>
-              <th className="px-8 py-5 text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-white/5">Parameters</th>
-              <th className="px-8 py-5 text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-white/5">What is Measured</th>
-              <th className="px-8 py-5 text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-white/5 text-center">Accepted Threshold</th>
-              <th className="px-8 py-5 text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-white/5">Score</th>
-              <th className="px-8 py-5 text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-white/5 text-center">Status</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-white/5">
-            {stats.delay_matrix.assessment.filter(p => p.id !== 14).map((point) => (
-              <tr key={point.id} className="hover:bg-white/[0.02] transition-colors group border-b border-white/5 last:border-0">
-                <td className="px-8 py-5 text-sm font-black text-blue-500/70">{point.id}</td>
-                <td className="px-8 py-5">
-                  <div className="flex flex-col">
-                    <span className="text-sm font-bold text-gray-100 group-hover:text-white transition-colors">{point.name}</span>
-                    {point.id === 1 && point.details && (
-                      <div className="mt-2 flex flex-col gap-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-[8px] font-black text-blue-400 uppercase tracking-widest">Starts:</span>
-                          <span className="text-[10px] text-gray-500 truncate max-w-[200px] italic">{point.details.starts?.join(', ') || 'None'}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[8px] font-black text-green-400 uppercase tracking-widest">Finishes:</span>
-                          <span className="text-[10px] text-gray-500 truncate max-w-[200px] italic">{point.details.finishes?.join(', ') || 'None'}</span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </td>
-                <td className="px-8 py-5">
-                   <div className="flex flex-col gap-1 max-w-xs">
-                     <span className="text-[11px] text-gray-400 font-medium leading-relaxed">{point.measure}</span>
-                     {point.explanation && <span className="text-[9px] text-blue-400/70 font-bold italic">{point.explanation}</span>}
-                   </div>
-                </td>
-                <td className="px-8 py-5 text-xs font-black text-gray-300 font-mono tracking-tighter text-center">{point.threshold}</td>
-                <td className="px-8 py-5">
-                  <span className="text-[12px] font-black text-white bg-white/5 px-3 py-1 rounded-lg border border-white/10">
-                    {
-                      point.id === 13 ? point.val.toFixed(3) : 
-                      (point.id === 1 || point.id === 12 || point.id === 14 || point.id === 9 || point.id === 10) ? (point.status_text || (point.status ? 'Pass' : 'Fail')) :
-                      typeof point.val === 'number' ? point.val.toFixed(1) + '%' : point.val
-                    }
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+        {points.map((point) => {
+          const displayName = DISPLAY_NAMES[point.id] || point.name;
+          const band = getBand(point);
+          const flaggedCount = point.id === 1 && point.details
+            ? (point.details.starts?.length || 0) + (point.details.finishes?.length || 0)
+            : null;
+          const pointHistory = history[`dcma-${point.id}`] || [];
+          const trendValues = pointHistory
+            .map(p => p.value_numeric)
+            .filter(v => typeof v === 'number');
+
+          return (
+            <div
+              key={point.id}
+              className="bg-white border border-[#E5E7EB] rounded-lg px-3.5 py-3"
+            >
+              <div className="flex items-center justify-between mb-2 gap-2">
+                <span className="text-[12.5px] font-medium text-slate-900 truncate">
+                  {displayName}
+                </span>
+                <span className={`text-xs font-semibold font-mono px-2 py-[3px] rounded-full whitespace-nowrap ${BAND_CLASSES[band]}`}>
+                  {formatValue(point)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-slate-400 gap-2">
+                <span className="truncate">Target: {point.threshold}</span>
+                {flaggedCount !== null && (
+                  <span
+                    className="truncate max-w-[110px] italic"
+                    title={`Starts: ${point.details.starts?.join(', ') || 'None'} | Finishes: ${point.details.finishes?.join(', ') || 'None'}`}
+                  >
+                    {flaggedCount} flagged
                   </span>
-                </td>
-                <td className="px-8 py-5">
-                  <div className="flex justify-center">
-                    <span className={`px-4 py-1 rounded-full text-[10px] font-black uppercase tracking-widest shadow-sm border ${
-                      (point.status_text === 'PASS' || point.status === true) ? 'bg-green-500/20 text-green-400 border-green-500/30' : 
-                      (point.status_text === 'WARNING') ? 'bg-orange-500/20 text-orange-400 border-orange-500/30' :
-                      'bg-red-500/20 text-red-400 border-red-500/30'
-                    }`}>
-                       {point.status_text || (point.status ? 'Pass' : 'Fail')}
-                    </span>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                )}
+                {trendValues.length >= 2 && <Sparkline values={trendValues} band={band} />}
+              </div>
+              {trendValues.length === 1 && (
+                <p className="text-[10px] text-slate-400 italic mt-1">Trend appears after next update</p>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

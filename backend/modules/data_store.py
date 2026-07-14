@@ -1142,10 +1142,11 @@ class XERDataStore:
         if not finish_milestone.empty:
             total_float_hrs = finish_milestone['float_hrs'].min()
         else:
-            # Fallback: Minimum float of all tasks, but capped to avoid extreme outliers (orphans)
+            # Fallback: Minimum float of all tasks
             total_float_hrs = df['float_hrs'].min() if not df.empty else 0
-            # If the float is so negative it's more than the project duration, it's likely a data error/orphan
-            total_float_hrs = max(total_float_hrs, -(project_work_days * self.hours_per_day))
+
+        # If the float is so negative it's more than the project duration, it's likely a data error/orphan
+        total_float_hrs = max(total_float_hrs, -(project_work_days * self.hours_per_day))
 
         min_float_days = total_float_hrs / self.hours_per_day
         pt13_val = round((project_work_days + min_float_days) / project_work_days, 3)

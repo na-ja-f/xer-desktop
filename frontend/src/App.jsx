@@ -673,7 +673,7 @@ function App() {
               handleUpload={handleUpload}
               loading={loading}
               mode="compact_row"
-              showUpdates={false}
+              showUpdates={true}
             />
 
             <AuditDashboard stats={auditStats} />

@@ -116,6 +116,41 @@ def get_finding(finding_id: str) -> Optional[Dict[str, Any]]:
     return result
 
 
+def get_findings_history(
+    project_id: str,
+    finding_category: str = "audit",
+    check_source: str = "dcma",
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Returns DS7 history for every check_id matching the filters, grouped by
+    check_id and ordered oldest -> newest. Read-only; does not filter by
+    snapshot count (that's a display decision left to the caller)."""
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            """
+            SELECT check_id, snapshot_id, computed_at, value_numeric, severity
+            FROM findings
+            WHERE project_id = ? AND finding_category = ? AND check_source = ?
+            ORDER BY check_id ASC, computed_at ASC
+            """,
+            (project_id, finding_category, check_source),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    history: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        r = dict(row)
+        history.setdefault(r["check_id"], []).append({
+            "snapshot_id": r["snapshot_id"],
+            "computed_at": r["computed_at"],
+            "value_numeric": r["value_numeric"],
+            "severity": r["severity"],
+        })
+    return history
+
+
 def list_findings(limit: int = 100) -> List[Dict[str, Any]]:
     conn = get_connection()
     try:

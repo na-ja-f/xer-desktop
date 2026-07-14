@@ -12,8 +12,8 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
 
 from modules.extractor import CompleteXERExtractor
 from modules.analyzer import XERAnalyzer
-from modules.db import init_db
-from modules.findings import write_findings_for_version
+from modules.db import init_db, get_findings_history
+from modules.findings import write_findings_for_version, project_identity
 
 app = FastAPI()
 
@@ -220,6 +220,18 @@ async def get_versions(context: str = "audit"):
     # Sort updates by date, baseline first
     versions.sort(key=lambda x: (0 if x["type"] == "baseline" else 1, x["data_date"]))
     return versions
+
+@app.get("/findings/history")
+async def get_findings_history_endpoint(context: str = "audit"):
+    """Returns DS7 DCMA finding history grouped by check_id for the active
+    version's project, for sparkline rendering (B-015 part 2)."""
+    version = analyzer.data_store.get_version(context=context)
+    if not version:
+        raise HTTPException(status_code=404, detail="No active version for this context")
+
+    project_id, _ = project_identity(version, data_store=analyzer.data_store, context=context)
+    history = get_findings_history(project_id)
+    return {"project_id": project_id, "history": history}
 
 @app.delete("/versions/{version_id}")
 async def delete_version(version_id: str, context: str = "audit"):

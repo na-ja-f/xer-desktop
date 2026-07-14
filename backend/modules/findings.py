@@ -36,10 +36,29 @@ _DCMA_THRESHOLDS = {
 _DCMA_UNITS = {13: "ratio"}
 
 
-def _project_identity(version: Dict) -> Tuple[str, str]:
-    project_id = version.get("proj_short_name") or version.get("name") or "unknown"
+def project_identity(version: Dict, data_store=None, context: str = "audit") -> Tuple[str, str]:
+    """Resolves the DS7 project_id/snapshot_id for a version.
+
+    A baseline starts a new trend "root" (its own version id is the
+    project_id). An update inherits its project_id from its validated paired
+    baseline (data_store.get_baseline, the existing B-040 activity-overlap
+    check) so DCMA history accumulates as one continuous trend across a
+    baseline and its updates, regardless of proj_short_name differences
+    between them. Falls back to proj_short_name/name when there's no
+    data_store or no validated pairing, so an orphaned/unrelated update still
+    gets tracked (just not merged into a baseline's trend it doesn't match).
+    """
     snapshot_id = version["id"]
-    return project_id, snapshot_id
+
+    if version.get("type") == "update" and data_store is not None:
+        baseline = data_store.get_baseline(context=context)
+        if baseline:
+            return baseline["id"], snapshot_id
+
+    if version.get("type") == "baseline":
+        return version["id"], snapshot_id
+
+    return version.get("proj_short_name") or version.get("name") or "unknown", snapshot_id
 
 
 def build_m1_findings(analysis: Dict, project_id: str, snapshot_id: str) -> List[Dict]:
@@ -167,7 +186,7 @@ def write_findings_for_version(data_store, version_id: str, context: str, file_t
     if not version:
         return {"m1_written": 0, "m2_written": 0}
 
-    project_id, snapshot_id = _project_identity(version)
+    project_id, snapshot_id = project_identity(version, data_store=data_store, context=context)
     analysis = data_store.get_deterministic_analysis(version_id=version_id, context=context)
     if not analysis:
         return {"m1_written": 0, "m2_written": 0}
