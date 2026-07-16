@@ -8,7 +8,7 @@ import logo from './assets/logo.png'
 import VersionManagerSection from './components/VersionManagerSection'
 import OptimizedChatInput from './components/OptimizedChatInput'
 import Sidebar from './components/ui/Sidebar'
-import AuditDashboard from './components/audit/AuditDashboard'
+import AuditHero from './components/audit/AuditHero'
 import AssessmentTable from './components/audit/AssessmentTable'
 import AuditAiChat from './components/audit/AuditAiChat'
 import ControllerToolbar from './components/controller/ControllerToolbar'
@@ -676,7 +676,7 @@ function App() {
               showUpdates={true}
             />
 
-            <AuditDashboard stats={auditStats} />
+            <AuditHero stats={auditStats} />
             {/* --- AI CHAT SECTION --- */}
             <div className="max-w-6xl mx-auto px-6 py-6 pb-24">
                {/* 14-Point Assessment Table (DCMA Standard) */}

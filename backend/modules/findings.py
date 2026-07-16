@@ -187,6 +187,7 @@ def write_findings_for_version(data_store, version_id: str, context: str, file_t
         return {"m1_written": 0, "m2_written": 0}
 
     project_id, snapshot_id = project_identity(version, data_store=data_store, context=context)
+    version["ds7_project_id"] = project_id
     analysis = data_store.get_deterministic_analysis(version_id=version_id, context=context)
     if not analysis:
         return {"m1_written": 0, "m2_written": 0}

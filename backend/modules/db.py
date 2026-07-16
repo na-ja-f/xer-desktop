@@ -10,7 +10,7 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "xeragent.db"
 
@@ -149,6 +149,73 @@ def get_findings_history(
             "severity": r["severity"],
         })
     return history
+
+
+def delete_findings_for_snapshot(project_id: str, snapshot_id: str) -> int:
+    """Removes DS7 rows for one deleted version. Without this, DELETE
+    /versions/{id} only cleared in-memory state — the deleted version's
+    findings stayed in DS7 forever and kept showing up as a "ghost" entry
+    in get_score_history/get_findings_history, silently skewing trends
+    computed after it (e.g. a re-uploaded update comparing itself against
+    the invisible, supposedly-deleted prior upload)."""
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "DELETE FROM findings WHERE project_id = ? AND snapshot_id = ?",
+            (project_id, snapshot_id),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def get_score_history(
+    project_id: str,
+    finding_category: str = "audit",
+    check_source: str = "dcma",
+    exclude_check_ids: Tuple[str, ...] = ("dcma-14",),
+) -> List[Dict[str, Any]]:
+    """One pass/total score per snapshot, oldest -> newest."""
+    conn = get_connection()
+    try:
+        placeholders = ", ".join("?" for _ in exclude_check_ids)
+        cur = conn.execute(
+            f"""
+            SELECT snapshot_id, severity, computed_at
+            FROM findings
+            WHERE project_id = ? AND finding_category = ? AND check_source = ?
+              AND check_id NOT IN ({placeholders})
+            ORDER BY computed_at ASC
+            """,
+            (project_id, finding_category, check_source, *exclude_check_ids),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    snapshots: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for row in rows:
+        r = dict(row)
+        sid = r["snapshot_id"]
+        if sid not in snapshots:
+            snapshots[sid] = {"pass": 0, "total": 0, "computed_at": r["computed_at"]}
+            order.append(sid)
+        snapshots[sid]["total"] += 1
+        if r["severity"] == "pass":
+            snapshots[sid]["pass"] += 1
+
+    return [
+        {
+            "snapshot_id": sid,
+            "computed_at": snapshots[sid]["computed_at"],
+            "score": round(snapshots[sid]["pass"] / snapshots[sid]["total"] * 100)
+            if snapshots[sid]["total"]
+            else None,
+        }
+        for sid in order
+    ]
 
 
 def list_findings(limit: int = 100) -> List[Dict[str, Any]]:

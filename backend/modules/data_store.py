@@ -2,6 +2,9 @@ import pandas as pd
 import re
 from typing import Dict, List, Optional, Any
 from .scheduler import CPMScheduler, P6Calendar
+from . import db
+from .findings import project_identity
+from .audit_score import compute_hero, compute_trend
 
 class XERDataStore:
     """Stores all XER data with pre-computed statistics"""
@@ -181,6 +184,13 @@ class XERDataStore:
     def remove_version(self, version_id: str, context: str = "audit"):
         ctx = self.contexts.get(context, self.contexts["audit"])
         if version_id in ctx["versions"]:
+            version = ctx["versions"][version_id]
+            ds7_project_id = version.get("ds7_project_id")
+            if ds7_project_id:
+                try:
+                    db.delete_findings_for_snapshot(ds7_project_id, version_id)
+                except Exception as e:
+                    print(f"WARNING: failed to clean up DS7 findings for deleted version {version_id}: {e}")
             del ctx["versions"][version_id]
             if ctx["active_version_id"] == version_id:
                 # Find another version to make active, preferably a baseline
@@ -648,6 +658,16 @@ class XERDataStore:
         # Override the stats with the more robust deterministic analysis calculation
         stats['critical_count'] = health_metrics.get('criticalCount', stats.get('critical_count', 0))
         stats['negative_float_count'] = health_metrics.get('negativeFloatCount', stats.get('negative_float_count', 0))
+
+        # B-016: hero score/grade/status sentence + DS7-backed trend
+        try:
+            hero = compute_hero(stats['delay_matrix']['assessment'])
+            project_id, snapshot_id = project_identity(source, data_store=self, context=context)
+            hero['trend'] = compute_trend(db.get_score_history(project_id), snapshot_id)
+            stats['auditHero'] = hero
+        except Exception as e:
+            print(f"WARNING: audit hero computation failed: {e}")
+            stats['auditHero'] = None
 
         self._cached_stats[context] = stats
         return stats
