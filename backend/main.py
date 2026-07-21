@@ -12,8 +12,9 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
 
 from modules.extractor import CompleteXERExtractor
 from modules.analyzer import XERAnalyzer
-from modules.db import init_db, get_findings_history
+from modules.db import init_db, get_findings_history, get_findings_for_snapshot
 from modules.findings import write_findings_for_version, project_identity
+from modules.narrative import generate_audit_narrative
 
 app = FastAPI()
 
@@ -232,6 +233,20 @@ async def get_findings_history_endpoint(context: str = "audit"):
     project_id, _ = project_identity(version, data_store=analyzer.data_store, context=context)
     history = get_findings_history(project_id)
     return {"project_id": project_id, "history": history}
+
+@app.get("/findings/narrative")
+async def get_findings_narrative(version_id: Optional[str] = None, context: str = "audit"):
+    """plain-language 2-3 paragraph narrative over the active
+    snapshot's DS7 M1 (DCMA) findings. Accepts version_id (unlike
+    /findings/history) so it tracks whichever snapshot is on screen, same as
+    /health."""
+    version = analyzer.data_store.get_version(version_id, context=context)
+    if not version:
+        raise HTTPException(status_code=404, detail="No active version for this context")
+
+    project_id, snapshot_id = project_identity(version, data_store=analyzer.data_store, context=context)
+    findings_rows = get_findings_for_snapshot(project_id, snapshot_id)
+    return generate_audit_narrative(findings_rows, analyzer.client, analyzer.model, analyzer.provider)
 
 @app.delete("/versions/{version_id}")
 async def delete_version(version_id: str, context: str = "audit"):

@@ -218,6 +218,43 @@ def get_score_history(
     ]
 
 
+def get_findings_for_snapshot(
+    project_id: str,
+    snapshot_id: str,
+    finding_category: str = "audit",
+    check_source: str = "dcma",
+    exclude_check_ids: Tuple[str, ...] = ("dcma-14",),
+) -> List[Dict[str, Any]]:
+    """All DS7 findings rows for one specific (project_id, snapshot_id) — the
+    complete point-in-time DCMA finding set for the M4 narrative to describe
+    (B-019). Unlike get_findings_history (grouped across all snapshots) this
+    returns exactly the rows for one snapshot, ordered by check_id for stable
+    prompt construction.
+
+    Excludes dcma-14 (Baseline/BEI) by default, same as get_score_history —
+    that check isn't evaluated yet (B-028, not started) and compute_hero /
+    AssessmentTable already filter it out, so leaving it in here would let
+    the narrative cite a check the rest of the audit page never shows."""
+    conn = get_connection()
+    try:
+        placeholders = ", ".join("?" for _ in exclude_check_ids)
+        exclude_clause = f"AND check_id NOT IN ({placeholders})" if exclude_check_ids else ""
+        cur = conn.execute(
+            f"""
+            SELECT check_id, check_name, severity, value_numeric, unit, narrative_hint
+            FROM findings
+            WHERE project_id = ? AND snapshot_id = ? AND finding_category = ? AND check_source = ?
+            {exclude_clause}
+            ORDER BY check_id
+            """,
+            (project_id, snapshot_id, finding_category, check_source, *exclude_check_ids),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
 def list_findings(limit: int = 100) -> List[Dict[str, Any]]:
     conn = get_connection()
     try:
