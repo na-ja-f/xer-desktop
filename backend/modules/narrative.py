@@ -48,8 +48,12 @@ def generate_audit_narrative(
 
     passing = sum(1 for f in findings_rows if f.get("severity") == "pass")
     failing = sum(1 for f in findings_rows if f.get("severity") == "fail")
+    # evaluatedCount = passing + failing (not len(findings_rows)) so a
+    # not-yet-evaluable check (severity="n/a", e.g. BEI before an update file
+    # is loaded) doesn't inflate "evaluated" — its row is still included in
+    # `findings` below so the narrative can describe its status.
     payload = {
-        "summary": {"evaluatedCount": len(findings_rows), "passingCount": passing, "failingCount": failing},
+        "summary": {"evaluatedCount": passing + failing, "passingCount": passing, "failingCount": failing},
         "findings": findings_rows,
     }
 

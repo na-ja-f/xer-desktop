@@ -74,10 +74,11 @@ AVAILABLE TOOLS:
       - `workweek_type`: '5-day', '6-day', '7-day'.
       - `semantic_tag`: 'RAMADAN', 'SUMMER', 'NIGHT_SHIFT', 'SHIFT'.
       - `calendar_name`: partial match on calendar name.
-28. get_calendar_exceptions(calendar_name: str, month: int, year: int, exception_type: str, limit: int) - Retrieve exception dates for a calendar. Use when user asks "show exception dates", "show holidays", "show working Saturdays", etc. 
+28. get_calendar_exceptions(calendar_name: str, month: int, year: int, exception_type: str, limit: int) - Retrieve exception dates for a calendar. Use when user asks "show exception dates", "show holidays", "show working Saturdays", etc.
       - `exception_type`: 'holiday' (for non-working dates), 'working' (for overrides).
       - `month`: 1-12 or None.
       - `year`: 4-digit year or None.
+29. check_bei() - Baseline Execution Index (DCMA point 14): fraction of activities baseline-scheduled to finish by the data date that actually finished by the data date. DCMA target >= 0.95. Use when user asks "what's our BEI", "baseline execution index", "are we executing to plan", "execution discipline". Requires an update file with progress data — if only the baseline is loaded, the tool itself returns the reason rather than a fabricated value; just relay that reason, do not guess a number.
 
 ACTIVITY CODE ROUTING RULES:
 - When a user asks about "Construction activities", "Sewer activities", "Sector 1A", or any category that matches a detected Activity Code Type or Value, route to get_activities_by_code.
@@ -389,6 +390,8 @@ class XERAnalyzer:
             result = self.check_integrity(context=ctx, version_id=selected_version)
         elif tool == "check_constraints":
             result = self.check_constraints(context=ctx, version_id=selected_version)
+        elif tool == "check_bei":
+            result = self.check_bei(context=ctx, version_id=selected_version)
         elif tool == "check_circular_dependencies":
             result = self.check_circular_dependencies(context=ctx)
         elif tool == "get_project_health":
@@ -1951,6 +1954,24 @@ class XERAnalyzer:
                 "data": [{"hard_constraints": hard}], "display_items": [], "all_items": [], "stats": {
                     "hard_constraints_pct": round(float(hard.get("val", 0)), 2),
                     "hard_constraints_status": hard.get("status_text", "UNKNOWN")
+                }, "template_type": "integrity"}
+
+    def check_bei(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        vid = source['id'] if source else None
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
+        assessment = analysis.get("projectSummary", {}).get("assessment", [])
+        bei = next((a for a in assessment if a["id"] == 14), {})
+
+        if bei.get("status") is None:
+            return {"success": False, "error": bei.get("na_reason") or "BEI requires an update file with progress data."}
+
+        return {"success": True, "total_count": 1, "displayed_count": 1,
+                "data": [{"bei": bei}], "display_items": [], "all_items": [], "stats": {
+                    "bei_val": round(float(bei.get("val", 0)), 3),
+                    "bei_status": "PASS" if bei.get("status") else "FAIL",
+                    "bei_threshold": bei.get("threshold", ">= 0.95"),
+                    "affected_count": bei.get("affected_count"),
                 }, "template_type": "integrity"}
 
     def check_circular_dependencies(self, context: str = "audit") -> Dict:

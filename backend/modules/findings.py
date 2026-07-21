@@ -30,10 +30,10 @@ _DCMA_THRESHOLDS = {
     11: {"fail_if": "> 5%"},
     12: {"fail_if": "no critical path"},
     13: {"fail_if": "< 0.95"},
-    14: {"fail_if": "no baseline assigned"},
+    14: {"fail_if": "< 0.95"},
 }
 
-_DCMA_UNITS = {13: "ratio"}
+_DCMA_UNITS = {13: "ratio", 14: "ratio"}
 
 
 def project_identity(version: Dict, data_store=None, context: str = "audit") -> Tuple[str, str]:
@@ -66,15 +66,34 @@ def build_m1_findings(analysis: Dict, project_id: str, snapshot_id: str) -> List
 
     Severity is a simple pass/fail derived from the existing boolean `status` —
     the raw DCMA computation has no 3-tier warning band, so none is invented here.
+    A check whose `status` is None (e.g. BEI before an update file is loaded)
+    is not evaluable at all — that gets its own "n/a" severity plus a
+    `refusal_reason`, rather than being coerced into a false "fail".
     """
     assessment = analysis.get("projectSummary", {}).get("assessment", [])
     findings = []
     for point in assessment:
         check_id = point["id"]
-        status = bool(point.get("status"))
+        raw_status = point.get("status")
         val = point.get("val")
         explanation = point.get("explanation") or point.get("measure", "")
-        narrative = f"{val:.1f}% — {explanation}" if isinstance(val, (int, float)) else explanation
+        unit = _DCMA_UNITS.get(check_id, "percent")
+
+        if raw_status is None:
+            severity = "n/a"
+            value_numeric = None
+            refusal_reason = point.get("na_reason") or explanation
+            narrative = refusal_reason
+        else:
+            severity = "pass" if bool(raw_status) else "fail"
+            value_numeric = float(val) if isinstance(val, (int, float)) else None
+            refusal_reason = None
+            if isinstance(val, (int, float)) and unit == "ratio":
+                narrative = f"{val:.3f} — {explanation}"
+            elif isinstance(val, (int, float)):
+                narrative = f"{val:.1f}% — {explanation}"
+            else:
+                narrative = explanation
 
         findings.append({
             "project_id": project_id,
@@ -83,14 +102,15 @@ def build_m1_findings(analysis: Dict, project_id: str, snapshot_id: str) -> List
             "check_id": f"dcma-{check_id}",
             "check_name": point["name"],
             "check_source": "dcma",
-            "severity": "pass" if status else "fail",
-            "value_numeric": float(val) if isinstance(val, (int, float)) else None,
-            "unit": _DCMA_UNITS.get(check_id, "percent"),
+            "severity": severity,
+            "value_numeric": value_numeric,
+            "unit": unit,
             "threshold_json": _DCMA_THRESHOLDS.get(check_id, {}),
             "activities_affected_count": point.get("affected_count"),
             "activities_affected_ids": point.get("affected_ids") or [],
             "attribution_json": {},
             "narrative_hint": narrative,
+            "refusal_reason": refusal_reason,
         })
     return findings
 

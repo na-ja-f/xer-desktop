@@ -10,7 +10,7 @@ as an argument rather than querying itself, so it stays testable in isolation.
 from typing import Dict, List, Optional
 
 # Mirrors AssessmentTable.jsx's DISPLAY_NAMES — kept in sync by hand since
-# each side renders its own copy of the same 13 evaluated DCMA point names.
+# each side renders its own copy of the same 14 DCMA point names.
 DISPLAY_NAMES = {
     1: "Missing logic",
     2: "Leads",
@@ -25,6 +25,7 @@ DISPLAY_NAMES = {
     11: "Missed tasks",
     12: "Critical path",
     13: "CPLI",
+    14: "BEI",
 }
 
 # 90+ = A, 80-89 = B+, 70-79 = B-, 55-69 = C, below 55 = D.
@@ -44,9 +45,12 @@ def compute_grade(score: float) -> str:
 
 
 def compute_hero(assessment: List[Dict]) -> Dict:
-    """Excludes point 14 (Baseline/BEI) — not yet evaluated (B-028, not
-    started), matching AssessmentTable.jsx's own `id !== 14` filter."""
-    points = [p for p in assessment if p.get("id") != 14]
+    """Excludes any point whose `status` is None — a check that wasn't
+    evaluable for this snapshot (e.g. BEI before an update file is loaded),
+    matching AssessmentTable.jsx's own null-status handling. Data-driven
+    rather than keyed off a specific check id, so `evaluated`/score/grade
+    automatically reflect however many checks actually produced a value."""
+    points = [p for p in assessment if p.get("status") is not None]
     evaluated = len(points)
     failing_points = [p for p in points if not p.get("status")]
     passing = evaluated - len(failing_points)

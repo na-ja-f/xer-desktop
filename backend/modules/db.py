@@ -174,21 +174,31 @@ def get_score_history(
     project_id: str,
     finding_category: str = "audit",
     check_source: str = "dcma",
-    exclude_check_ids: Tuple[str, ...] = ("dcma-14",),
+    exclude_check_ids: Tuple[str, ...] = (),
 ) -> List[Dict[str, Any]]:
-    """One pass/total score per snapshot, oldest -> newest."""
+    """One pass/total score per snapshot, oldest -> newest.
+
+    Always excludes severity='n/a' rows (checks that weren't evaluable for a
+    given snapshot, e.g. BEI before an update file is loaded) so "evaluated"
+    stays data-driven rather than keyed off a hardcoded check id."""
     conn = get_connection()
     try:
-        placeholders = ", ".join("?" for _ in exclude_check_ids)
+        exclude_clause = ""
+        params: List[Any] = [project_id, finding_category, check_source]
+        if exclude_check_ids:
+            placeholders = ", ".join("?" for _ in exclude_check_ids)
+            exclude_clause = f"AND check_id NOT IN ({placeholders})"
+            params.extend(exclude_check_ids)
         cur = conn.execute(
             f"""
             SELECT snapshot_id, severity, computed_at
             FROM findings
             WHERE project_id = ? AND finding_category = ? AND check_source = ?
-              AND check_id NOT IN ({placeholders})
+              AND severity != 'n/a'
+              {exclude_clause}
             ORDER BY computed_at ASC
             """,
-            (project_id, finding_category, check_source, *exclude_check_ids),
+            params,
         )
         rows = cur.fetchall()
     finally:
@@ -223,7 +233,7 @@ def get_findings_for_snapshot(
     snapshot_id: str,
     finding_category: str = "audit",
     check_source: str = "dcma",
-    exclude_check_ids: Tuple[str, ...] = ("dcma-14",),
+    exclude_check_ids: Tuple[str, ...] = (),
 ) -> List[Dict[str, Any]]:
     """All DS7 findings rows for one specific (project_id, snapshot_id) — the
     complete point-in-time DCMA finding set for the M4 narrative to describe
@@ -231,10 +241,10 @@ def get_findings_for_snapshot(
     returns exactly the rows for one snapshot, ordered by check_id for stable
     prompt construction.
 
-    Excludes dcma-14 (Baseline/BEI) by default, same as get_score_history —
-    that check isn't evaluated yet (B-028, not started) and compute_hero /
-    AssessmentTable already filter it out, so leaving it in here would let
-    the narrative cite a check the rest of the audit page never shows."""
+    Unlike get_score_history, this does NOT filter out severity='n/a' rows —
+    the narrative should still see e.g. a not-yet-evaluable BEI row (with its
+    refusal_reason) so it can describe that status accurately instead of
+    silently omitting the check."""
     conn = get_connection()
     try:
         placeholders = ", ".join("?" for _ in exclude_check_ids)

@@ -1171,6 +1171,39 @@ class XERDataStore:
         min_float_days = total_float_hrs / self.hours_per_day
         pt13_val = round((project_work_days + min_float_days) / project_work_days, 3)
 
+        # Check 14: BEI (Baseline Execution Index)
+        # Of the activities baseline-scheduled to finish by the data date,
+        # what fraction actually finished by the data date? Requires an
+        # update file (actual completions) — a baseline-only schedule has
+        # nothing to measure, so this reports N/A rather than a fabricated value.
+        bei_val = None
+        bei_status = None
+        bei_na_reason = None
+        bei_affected_count = None
+        bei_affected_ids = []
+
+        if is_baseline_only:
+            bei_na_reason = "BEI requires an update file with progress data"
+        elif pd.isnull(data_date):
+            bei_na_reason = "BEI could not be evaluated because the data date is unknown"
+        else:
+            bl_finish_map = {code: d.get('finish') for code, d in baseline_dates_map.items()}
+            df['_bei_bl_finish'] = df['task_code'].map(bl_finish_map)
+            planned_complete = df[pd.notnull(df['_bei_bl_finish']) & (df['_bei_bl_finish'] <= data_date)]
+            planned_count = len(planned_complete)
+
+            actually_complete = df[(df['status_enum'] == 'COMPLETED') & pd.notnull(df['_dt_act_end_date']) & (df['_dt_act_end_date'] <= data_date)]
+            actual_count = len(actually_complete)
+
+            if planned_count == 0:
+                bei_na_reason = "No activities were baseline-scheduled to complete by the data date"
+            else:
+                bei_val = round(actual_count / planned_count, 3)
+                bei_status = bool(bei_val >= 0.95)
+                missed = planned_complete[~planned_complete['task_code'].isin(actually_complete['task_code'])]
+                bei_affected_count = len(missed)
+                bei_affected_ids = missed['task_code'].tolist()
+
         assessment = [
             {"id": 1, "name": "Logic", "measure": "Open Starts & Finishes", "val": float(pt1_val), "threshold": "1 Start / 1 Finish", "status": bool(logic_status_str == "PASS"), "status_text": logic_status_str, "explanation": logic_explanation, "details": {"starts": open_start_names, "finishes": open_finish_names}},
             {"id": 2, "name": "Leads", "measure": "% links with Negative Lag", "val": float(pt2_val), "threshold": "0%", "status": bool(pt2_val == 0)},
@@ -1185,7 +1218,7 @@ class XERDataStore:
             {"id": 11, "name": "Missed Tasks", "measure": "% completed tasks finished late", "val": float(pt11_val), "threshold": "<= 5%", "status": bool(pt11_val <= 5), "affected_count": missed_count, "affected_ids": missed_ids},
             {"id": 12, "name": "Critical Path", "measure": "Continuous path integrity", "val": 100.0, "threshold": "Required", "status": bool(critical_count > 0)},
             {"id": 13, "name": "CPLI", "measure": "Critical Path Length Index", "val": float(pt13_val), "threshold": ">= 0.95", "status": bool(pt13_val >= 0.95)},
-            {"id": 14, "name": "Baseline", "measure": "Project baseline assignment", "val": 100.0, "threshold": "Required", "status": bool(baseline_map)}
+            {"id": 14, "name": "BEI", "measure": "Baseline Execution Index — actual vs planned completions by data date", "val": bei_val, "threshold": ">= 0.95", "status": bei_status, "affected_count": bei_affected_count, "affected_ids": bei_affected_ids, "na_reason": bei_na_reason}
         ]
 
         # 7. Quality Metrics Aggregate
@@ -1203,6 +1236,7 @@ class XERDataStore:
         if pt11_val > 5: score -= 10; issues.append(f"Missed tasks / Finished late ({pt11_val}%)")
         if critical_count == 0: score -= 10; issues.append("No critical path detected")
         if pt13_val < 0.95: score -= 5; issues.append(f"Low Critical Path Length Index (CPLI {pt13_val})")
+        if bei_val is not None and bei_val < 0.95: score -= 10; issues.append(f"Low Baseline Execution Index (BEI {bei_val})")
         if not baseline_map: issues.append("No baseline assigned for variance tracking")
         
         if project_delay_days is not None and project_delay_days > 0:

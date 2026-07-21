@@ -15,22 +15,28 @@ const DISPLAY_NAMES = {
   11: 'Missed tasks',
   12: 'Critical path',
   13: 'CPLI',
+  14: 'BEI',
 };
 
 const BAND_CLASSES = {
   pass: 'bg-[#D1FAE5] text-[#047857]',
   warn: 'bg-[#FEF3C7] text-[#B45309]',
   fail: 'bg-[#FEE2E2] text-[#B91C1C]',
+  na: 'bg-[#F1F5F9] text-[#64748B]',
 };
 
+const isNA = (point) => point.status === null || point.status === undefined;
+
 const getBand = (point) => {
+  if (isNA(point)) return 'na';
   if (point.status_text === 'PASS' || point.status === true) return 'pass';
   if (point.status_text === 'WARNING') return 'warn';
   return 'fail';
 };
 
 const formatValue = (point) => {
-  if (point.id === 13) return point.val.toFixed(3);
+  if (isNA(point)) return 'N/A';
+  if ([13, 14].includes(point.id)) return point.val.toFixed(3);
   if ([1, 9, 10, 12].includes(point.id)) {
     return point.status_text || (point.status ? 'Pass' : 'Fail');
   }
@@ -41,6 +47,7 @@ const BAND_STROKE = {
   pass: '#047857',
   warn: '#B45309',
   fail: '#B91C1C',
+  na: '#64748B',
 };
 
 const Sparkline = ({ values, band }) => {
@@ -87,7 +94,7 @@ const AssessmentTable = ({ stats }) => {
 
   if (!stats?.delay_matrix?.assessment) return null;
 
-  const points = stats.delay_matrix.assessment.filter(p => p.id !== 14);
+  const points = stats.delay_matrix.assessment;
 
   return (
     <div className="mb-10">
@@ -119,7 +126,10 @@ const AssessmentTable = ({ stats }) => {
                 <span className="text-[12.5px] font-medium text-slate-900 truncate">
                   {displayName}
                 </span>
-                <span className={`text-xs font-semibold font-mono px-2 py-[3px] rounded-full whitespace-nowrap ${BAND_CLASSES[band]}`}>
+                <span
+                  className={`text-xs font-semibold font-mono px-2 py-[3px] rounded-full whitespace-nowrap ${BAND_CLASSES[band]}`}
+                  title={band === 'na' ? point.na_reason : undefined}
+                >
                   {formatValue(point)}
                 </span>
               </div>
