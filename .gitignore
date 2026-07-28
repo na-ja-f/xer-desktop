@@ -38,3 +38,5 @@ launch.json
 
 # Local SQLite pilot (DS7 findings, etc.)
 backend/data/
+
+backend/local_tests/

@@ -1,10 +1,14 @@
 """
-DS7 findings table — local SQLite pilot.
+DS7 findings + DS8 changes tables — local SQLite pilot.
 
-Schema is adapted from AI_Planner_Facts_Table_Schema_v0.1.docx section 7
-(Postgres JSONB -> TEXT holding json.dumps, DECIMAL -> REAL, VARCHAR(n) -> TEXT).
-This module only defines storage + a basic insert/read helper — nothing in
-analyzer.py or data_store.py writes to it yet (M1/M2 wiring is a separate task).
+Schema is adapted from AI_Planner_Facts_Table_Schema_v0.1.docx sections 7
+(findings) and 8 (changes) (Postgres JSONB -> TEXT holding json.dumps,
+DECIMAL -> REAL, VARCHAR(n) -> TEXT). Both tables live in the same SQLite
+file, so they share one connection/init module.
+
+DS8 (changes) only has storage + a basic insert/read helper here — the diff
+engine that actually computes and writes rows (comparing two snapshots) is a
+separate follow-on task, same as DS7's findings.py was for DS7.
 """
 import json
 import sqlite3
@@ -50,6 +54,34 @@ _CREATE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_findings_driver ON findings(org_id, project_id, snapshot_id, primary_driver_dimension, primary_driver_value);",
 )
 
+_CHANGES_JSON_COLUMNS = ("old_value", "new_value", "attribution_json")
+
+_CREATE_CHANGES_TABLE = """
+CREATE TABLE IF NOT EXISTS changes (
+    change_id         TEXT NOT NULL,
+    org_id            TEXT NOT NULL,
+    project_id        TEXT NOT NULL,
+    from_snapshot_id  TEXT NOT NULL,
+    to_snapshot_id    TEXT NOT NULL,
+    change_type       TEXT NOT NULL,
+    entity_type       TEXT NOT NULL,
+    entity_id         TEXT NOT NULL,
+    field_changed     TEXT,
+    old_value         TEXT,
+    new_value         TEXT,
+    delta_numeric     REAL,
+    attribution_json  TEXT NOT NULL,
+    narrative_hint    TEXT NOT NULL,
+    computed_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (org_id, project_id, change_id)
+);
+"""
+
+_CREATE_CHANGES_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_changes_snapshots ON changes(org_id, project_id, from_snapshot_id, to_snapshot_id);",
+    "CREATE INDEX IF NOT EXISTS idx_changes_type ON changes(org_id, project_id, change_type);",
+)
+
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +96,9 @@ def init_db() -> None:
     try:
         conn.execute(_CREATE_FINDINGS_TABLE)
         for stmt in _CREATE_INDEXES:
+            conn.execute(stmt)
+        conn.execute(_CREATE_CHANGES_TABLE)
+        for stmt in _CREATE_CHANGES_INDEXES:
             conn.execute(stmt)
         conn.commit()
     finally:
@@ -276,6 +311,70 @@ def list_findings(limit: int = 100) -> List[Dict[str, Any]]:
     for row in rows:
         result = dict(row)
         for col in _JSON_COLUMNS:
+            if result.get(col):
+                result[col] = json.loads(result[col])
+        results.append(result)
+    return results
+
+
+def insert_change(change: Dict[str, Any]) -> str:
+    """
+    Inserts a single DS8 change row. `change` should contain the DS8
+    columns; change_id/org_id/computed_at are filled in with defaults if
+    omitted. old_value/new_value/attribution_json may be passed as Python
+    objects (dict/list) — they get json.dumps'd here. old_value/new_value
+    stay NULL when omitted (both nullable in the schema); attribution_json
+    defaults to "{}" since it's NOT NULL.
+    """
+    row = dict(change)
+    row.setdefault("change_id", str(uuid.uuid4()))
+    row.setdefault("org_id", "local")
+
+    for col in _CHANGES_JSON_COLUMNS:
+        if col in row and not isinstance(row[col], str):
+            row[col] = json.dumps(row[col])
+    row.setdefault("attribution_json", "{}")
+
+    columns = list(row.keys())
+    placeholders = ", ".join(f":{c}" for c in columns)
+    col_list = ", ".join(columns)
+
+    conn = get_connection()
+    try:
+        conn.execute(f"INSERT INTO changes ({col_list}) VALUES ({placeholders})", row)
+        conn.commit()
+    finally:
+        conn.close()
+    return row["change_id"]
+
+
+def get_change(change_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    try:
+        cur = conn.execute("SELECT * FROM changes WHERE change_id = ?", (change_id,))
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    result = dict(row)
+    for col in _CHANGES_JSON_COLUMNS:
+        if result.get(col):
+            result[col] = json.loads(result[col])
+    return result
+
+
+def list_changes(limit: int = 100) -> List[Dict[str, Any]]:
+    conn = get_connection()
+    try:
+        cur = conn.execute("SELECT * FROM changes ORDER BY computed_at DESC LIMIT ?", (limit,))
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    results = []
+    for row in rows:
+        result = dict(row)
+        for col in _CHANGES_JSON_COLUMNS:
             if result.get(col):
                 result[col] = json.loads(result[col])
         results.append(result)
