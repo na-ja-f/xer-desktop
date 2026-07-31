@@ -9,6 +9,9 @@ node_modules/
 frontend/node_modules/
 electron/node_modules/
 dist/
+dist_*/
+backend/build/
+backend/*.spec
 frontend/dist/
 
 # Python
@@ -40,3 +43,7 @@ launch.json
 backend/data/
 
 backend/local_tests/
+
+# Licensing private key — must never be committed (see licensing/README.md)
+licensing/private-key.pem
+licensing/*.pem
