@@ -15,6 +15,7 @@ from modules.analyzer import XERAnalyzer
 from modules.db import init_db, get_findings_history, get_findings_for_snapshot
 from modules.findings import write_findings_for_version, project_identity
 from modules.changes import write_changes_for_version
+from modules.forensic import write_forensic_findings_for_version
 from modules.narrative import generate_audit_narrative
 
 app = FastAPI()
@@ -165,6 +166,12 @@ async def upload_xer(
             print(f"DS8 changes written: {changes_written}")
         except Exception as e:
             print(f"WARNING: DS8 changes write failed: {e}")
+
+        try:
+            forensic_written = write_forensic_findings_for_version(analyzer.data_store, version_id, context, file_type)
+            print(f"DS7 forensic findings written: {forensic_written}")
+        except Exception as e:
+            print(f"WARNING: DS7 forensic findings write failed: {e}")
 
         stats = analyzer.get_basic_stats(context=context)
         os.remove(temp_path)
