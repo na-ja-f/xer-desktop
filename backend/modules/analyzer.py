@@ -141,6 +141,11 @@ GUIDELINES:
    3. **Positive Findings**: Highlight the passing DCMA checks to reassure the user.
    4. **Overall Assessment**: Conclude the forensic state of the schedule.
    Put the actionable, prioritized fixes into the JSON `recommendations` array so they render as strategic cards. When making recommendations, you MUST cite the specific metric value or threshold from the assessment (e.g., 'Reduce 30.98% high float to <5%'). Do NOT hallucinate metrics; derive everything strictly from `assessment_details` and `issues`.
+- DELAY DRIVER GROUNDING (tool: analyze_activity_delay) — B-004.1: The backend payload carries deterministic, pre-computed grounding — never invent numbers or phrasing here yourself. You MUST ground the [RECOMMENDATION] insight and the `recommendations` array strictly in this data, per these rules, and NEVER output generic platitudes like "ensure prerequisites are completed", "monitor progress closely", or "coordinate with stakeholders":
+   1. NEAR-TERM RISK (highest priority): If `near_term_risk` is present (non-null), copy its `deterministic_recommendation` string into the `recommendations` array VERBATIM — word for word, no rephrasing, no recomputing the percentage or remaining days yourself. Use that same sentence (or a direct quote of it) as the [RECOMMENDATION] insight too. This field already encodes the exact manager-approved pattern: "[Activity] is scheduled to start [date] but its predecessor [Activity] is [X]% complete with [Y] days remaining," plus a count of any additional incomplete predecessors — do not add to or shorten it.
+   2. ALL PREDECESSORS COMPLETE: Else if `all_predecessors_complete` is true, say so explicitly and name them from the `predecessors` array, e.g. "All predecessors ('Submit QA Plan', 'Procure Steel Beams') are already complete — the constraint here is this activity's own float, not upstream logic." Do not tell the user to "ensure prerequisites are completed" when the data shows they already are.
+   3. NO ACTIONABLE DATA: Else if `has_actionable_recommendation_data` is false, the `recommendations` array MUST be empty (`[]`) — do not invent a recommendation when there is no near-term risk, completed-predecessor fact, criticality, or delay signal to ground it in.
+   4. Every recommendation must resolve to the verbatim `deterministic_recommendation` string, an explicit "all predecessors complete" statement, or be omitted per rule 3 — there is no fourth, generic option.
 - ACTIVITY CODES: When explaining activity code types (from get_activity_code_types), you MUST explicitly list and group the counts by Scope in your summary using markdown. Example format: "**Project Activity Codes (4)** - used for... \n\n**Global Activity Codes (2)** - used for...". Do NOT just write a single flat paragraph.
 - ACTIVITY CODE HIERARCHIES: When explaining code values (from get_activity_code_values) and hierarchy data (children/parents) is present, you MUST present the values as a tree using markdown characters (├ and └) instead of a flat list. Do not flatten the hierarchy. Example:
   PACKAGE 1A
@@ -2024,36 +2029,194 @@ class XERAnalyzer:
         return {"success": True, "total_count": len(data), "displayed_count": len(data),
                 "is_truncated": False, "data": data, "display_items": data, "all_items": data, "stats": {"total_nodes": len(data)}}
 
+    # B-004.1: default lookahead window (working days) for flagging an incomplete predecessor as a
+    # near-term risk — matches the two-week planner lookahead per manager sign-off (2026-08-04).
+    # No project-config layer exists yet (tracked separately as B-205: add lookahead_window_days to
+    # config schema). Until B-205 lands, _get_lookahead_window_days() is the single lookup point —
+    # never hardcode this window inline anywhere else.
+    DEFAULT_LOOKAHEAD_WINDOW_DAYS = 10
+
+    def _get_lookahead_window_days(self, source: Dict) -> int:
+        """B-004.1: reads source['config']['lookahead_window_days'] once a config layer (B-205)
+        is wired in; falls back to DEFAULT_LOOKAHEAD_WINDOW_DAYS until then."""
+        cfg = (source or {}).get("config") or {}
+        try:
+            val = cfg.get("lookahead_window_days")
+            return int(val) if val is not None else self.DEFAULT_LOOKAHEAD_WINDOW_DAYS
+        except (TypeError, ValueError):
+            return self.DEFAULT_LOOKAHEAD_WINDOW_DAYS
+
+    @staticmethod
+    def _task_percent_complete(row: Dict) -> Optional[float]:
+        """CP_Phys / CP_Drtn / CP_Units dispatch, mirroring the EV percent-complete logic in
+        data_store.py's get_deterministic_analysis, as a standalone helper so B-004.1's
+        predecessor-completion math doesn't need the full EV pipeline. Returns 0-100 or None."""
+        import pandas as pd
+        pct_type = row.get("complete_pct_type")
+        status = row.get("status_code")
+        if pct_type == "CP_Phys":
+            phys = pd.to_numeric(row.get("phys_complete_pct"), errors="coerce")
+            return float(phys) if pd.notnull(phys) else 0.0
+        if pct_type == "CP_Drtn":
+            orig = pd.to_numeric(row.get("target_drtn_hr_cnt"), errors="coerce")
+            rem = pd.to_numeric(row.get("remain_drtn_hr_cnt"), errors="coerce")
+            if pd.notnull(orig) and orig > 0:
+                dur_pct = (orig - (rem if pd.notnull(rem) else 0)) / orig
+                return round(max(0.0, min(1.0, dur_pct)) * 100, 1)
+            return 100.0 if status == "TK_Complete" else 0.0
+        if pct_type == "CP_Units":
+            return 100.0 if status == "TK_Complete" else None
+        return None
+
     def analyze_activity_delay(self, activity_name: str, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        import pandas as pd
+        from .scheduler import P6Calendar
+
         source = self.data_store.get_latest(context=context, version_id=version_id)
         if source and source.get("type") == "baseline":
             return {"success": False, "error": f"Cannot compute schedule variance or delay for '{activity_name}' because only the baseline schedule is loaded. Variance requires actual progress data. Per the baseline, the activity is scheduled to start on and finish on baseline dates. To assess if it's delayed or ahead, please upload an update file."}
-            
+
         # Resolve activity by name first
         res = self.get_activity_details(activity_name, context=context, version_id=version_id)
         if not res.get("success") or not res.get("data"):
             return res
-        
+
         act = res["data"][0]
         activity_id = act["id"]
         source = self.data_store.get_latest(context=context, version_id=version_id)
         graph = (source or {}).get("dependency_graph", {})
         node = graph.get(activity_id, {})
-        
+
+        tasks_df = source["df"]["tasks"]
+        tasks_indexed = tasks_df.set_index("task_id", drop=False)
+        hpd = source.get("hours_per_day", 8.0) or 8.0
+        data_date = pd.to_datetime(source.get("data_date"), errors="coerce")
+
+        # B-004.1: per-calendar working-day arithmetic — the lookahead window must be counted on
+        # the activity's OWN calendar (a 5-day authority activity spans two calendar weeks in 10
+        # working days; a 7-day procurement one doesn't), not flat calendar days.
+        calendars_df = source["df"].get("calendar", source["df"].get("CALENDAR"))
+        cal_map = {}
+        if calendars_df is not None and not calendars_df.empty:
+            for _, crow in calendars_df.iterrows():
+                cal_map[str(crow.get("clndr_id"))] = P6Calendar(crow.to_dict())
+
+        def _cal_for(tid):
+            if tid in tasks_indexed.index:
+                return cal_map.get(str(tasks_indexed.loc[tid].get("clndr_id", "")), P6Calendar())
+            return P6Calendar()
+
+        def _display_list(rel_list):
+            out = []
+            for rel in rel_list:
+                prow = tasks_indexed.loc[rel["id"]] if rel["id"] in tasks_indexed.index else None
+                if prow is not None:
+                    act_finish = pd.to_datetime(prow.get("act_end_date"), errors="coerce")
+                    act_start_r = pd.to_datetime(prow.get("act_start_date"), errors="coerce")
+                    status = "Completed" if pd.notnull(act_finish) else ("In Progress" if pd.notnull(act_start_r) else "Not Started")
+                    code = prow.get("task_code", "")
+                else:
+                    status, code = "Not Started", ""
+                out.append({**rel, "code": code, "status": status})
+            return out
+
+        predecessors_raw = node.get("predecessors", [])[:5]
+        successors_raw = node.get("successors", [])[:5]
+        predecessors = _display_list(predecessors_raw)
+        successors = _display_list(successors_raw)
+
+        # B-004.1: "incomplete" per manager spec = remaining duration > 0 OR no actual finish.
+        def _is_predecessor_complete(pid):
+            if pid not in tasks_indexed.index:
+                return True  # unknown activity carries no risk signal
+            prow = tasks_indexed.loc[pid]
+            act_finish = pd.to_datetime(prow.get("act_end_date"), errors="coerce")
+            remain_hrs = pd.to_numeric(prow.get("remain_drtn_hr_cnt"), errors="coerce")
+            remain_hrs = remain_hrs if pd.notnull(remain_hrs) else 0.0
+            return pd.notnull(act_finish) and remain_hrs <= 0
+
+        all_predecessors_complete = bool(predecessors_raw) and all(_is_predecessor_complete(p["id"]) for p in predecessors_raw)
+
+        # B-004.1: near-term risk fires only when all three manager-specified conditions hold:
+        #   1) activity.early_start <= data_date + lookahead_window_days (working days, activity's own calendar)
+        #   2) activity has no actual start
+        #   3) at least one predecessor is incomplete
+        # When multiple predecessors are incomplete, the "driving" one is whichever has the latest
+        # early_finish — the actual constraint holding back this activity's start.
+        near_term_risk = None
+        lookahead_days = self._get_lookahead_window_days(source)
+
+        if activity_id in tasks_indexed.index and pd.notnull(data_date):
+            cur_row = tasks_indexed.loc[activity_id]
+            early_start = pd.to_datetime(cur_row.get("early_start"), errors="coerce")
+            not_started = pd.isnull(pd.to_datetime(cur_row.get("act_start_date"), errors="coerce"))
+            window_end = _cal_for(activity_id).add_workdays(data_date, lookahead_days)
+            within_window = pd.notnull(early_start) and early_start <= window_end
+
+            if within_window and not_started:
+                incomplete = []
+                for p in predecessors_raw:
+                    pid = p["id"]
+                    if pid not in tasks_indexed.index or _is_predecessor_complete(pid):
+                        continue
+                    prow = tasks_indexed.loc[pid]
+                    remain_hrs = pd.to_numeric(prow.get("remain_drtn_hr_cnt"), errors="coerce")
+                    incomplete.append({
+                        "id": pid,
+                        "code": prow.get("task_code", ""),
+                        "name": prow.get("task_name", p.get("name", "")),
+                        "early_finish": pd.to_datetime(prow.get("early_finish"), errors="coerce"),
+                        "percent_complete": self._task_percent_complete(prow.to_dict()),
+                        "remaining_days": round((remain_hrs if pd.notnull(remain_hrs) else 0.0) / hpd, 1)
+                    })
+
+                if incomplete:
+                    incomplete.sort(key=lambda x: (pd.notnull(x["early_finish"]), x["early_finish"]), reverse=True)
+                    driving = incomplete[0]
+                    others = len(incomplete) - 1
+
+                    early_start_display = f"{early_start.strftime('%b')} {early_start.day}, {early_start.year}"
+                    pct_display = f"{driving['percent_complete']:.0f}" if driving["percent_complete"] is not None else "an unknown"
+                    rec_text = (f"{act['code']} - {act['name']} is scheduled to start {early_start_display} "
+                                f"but its predecessor {driving['code']} - {driving['name']} is "
+                                f"{pct_display}% complete with {driving['remaining_days']} days remaining.")
+                    if others > 0:
+                        rec_text += f" ({others} more incomplete predecessor{'s' if others > 1 else ''}.)"
+
+                    near_term_risk = {
+                        "activity_early_start": str(early_start.date()),
+                        "lookahead_window_days": lookahead_days,
+                        "driving_predecessor_id": driving["id"],
+                        "driving_predecessor_code": driving["code"],
+                        "driving_predecessor_name": driving["name"],
+                        "driving_predecessor_percent_complete": driving["percent_complete"],
+                        "driving_predecessor_remaining_days": driving["remaining_days"],
+                        "additional_incomplete_predecessor_count": others,
+                        "deterministic_recommendation": rec_text
+                    }
+
+        has_actionable_recommendation_data = bool(near_term_risk) or all_predecessors_complete or act["is_critical"] or (act.get("delay_days") or 0) > 0
+
         act_data = [{
                     "id": activity_id, "code": act["code"], "name": act["name"],
                     "wbs_path": act.get("wbs_path", ""),
                     "delay_days": act["delay_days"], "float_days": act["float_days"],
                     "is_critical": act["is_critical"],
-                    "predecessors": node.get("predecessors", [])[:5],
-                    "successors": node.get("successors", [])[:5]
+                    "predecessors": predecessors,
+                    "successors": successors,
+                    "all_predecessors_complete": all_predecessors_complete,
+                    "near_term_risk": near_term_risk,
+                    "has_actionable_recommendation_data": has_actionable_recommendation_data
                 }]
-        
+
         return {"success": True, "total_count": 1, "displayed_count": 1,
                 "data": act_data, "display_items": act_data, "all_items": act_data,
                 "stats": {"delay_days": act["delay_days"],
-                          "predecessor_count": len(node.get("predecessors", [])),
-                          "successor_count": len(node.get("successors", []))}, "template_type": "analysis"}
+                          "predecessor_count": len(predecessors),
+                          "successor_count": len(successors),
+                          "all_predecessors_complete": all_predecessors_complete,
+                          "has_near_term_risk": bool(near_term_risk),
+                          "has_actionable_recommendation_data": has_actionable_recommendation_data}, "template_type": "analysis"}
 
     def get_wbs_branch_stats(self, context: str = "audit", version_id: Optional[str] = None) -> Dict:
         """Returns per-WBS-branch schedule performance metrics without requiring EV configuration.
