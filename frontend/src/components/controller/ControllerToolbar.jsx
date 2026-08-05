@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, ListTree, Link as LinkIcon, Info, Search, X, Zap, CheckCircle, Loader2, AlertTriangle, Users, Calendar, BarChart2 } from 'lucide-react';
+import { Activity, ListTree, Link as LinkIcon, Info, Search, X, Zap, CheckCircle, Loader2, AlertTriangle, Users, Calendar, BarChart2, Tag, Settings } from 'lucide-react';
 import VersionManagerSection from '../VersionManagerSection';
 
 const ControllerToolbar = ({
@@ -20,7 +20,10 @@ const ControllerToolbar = ({
   setIsControllerChatOpen,
   tableData,
   evmMethodology,
-  setEvmMethodology
+  setEvmMethodology,
+  showActivityCodeColumn,
+  setShowActivityCodeColumn,
+  onOpenActivityCodeSettings
 }) => {
   return (
     <>
@@ -88,9 +91,23 @@ const ControllerToolbar = ({
           </div>
         </div>
 
-        {/* Zone 3: AI Assistant Toggle */}
-        <div className="flex shrink-0">
-          <button 
+        {/* Zone 3: Activity Code controls + AI Assistant Toggle */}
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => setShowActivityCodeColumn(v => !v)}
+            title="Show/hide the Activity Code(s) column"
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${showActivityCodeColumn ? 'bg-white shadow-sm text-blue-700 border border-gray-200/50' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-200/50 border border-transparent'}`}
+          >
+            <Tag size={14} />
+          </button>
+          <button
+            onClick={onOpenActivityCodeSettings}
+            title="Activity Code category settings"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest text-gray-500 hover:text-gray-900 hover:bg-gray-200/50 border border-transparent transition-all"
+          >
+            <Settings size={14} />
+          </button>
+          <button
             onClick={() => setIsControllerChatOpen(!isControllerChatOpen)}
             className={`flex items-center gap-1.5 px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${isControllerChatOpen ? 'bg-gray-900 text-white shadow-xl translate-y-0.5' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-500/20'}`}
           >

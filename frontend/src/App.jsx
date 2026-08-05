@@ -19,6 +19,7 @@ import ResourceView from './components/controller/ResourceView'
 import CalendarSummary from './components/controller/CalendarSummary'
 import DashboardView from './components/controller/DashboardView'
 import { UploadWarningModal, UploadErrorModal } from './components/UploadModals'
+import ActivityCodeSettingsModal from './components/controller/ActivityCodeSettingsModal'
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -43,6 +44,8 @@ function App() {
   const [tableSearch, setTableSearch] = useState('')
   const [viewerFilter, setViewerFilter] = useState('ALL') // 'ALL', 'CRITICAL', 'NEG_FLOAT', 'POS_FLOAT', 'DELAYED', 'DELAYED_CRITICAL', 'DELAYED_NEGATIVE'
   const [evmMethodology, setEvmMethodology] = useState('LABOR')
+  const [showActivityCodeColumn, setShowActivityCodeColumn] = useState(false)
+  const [showActivityCodeSettings, setShowActivityCodeSettings] = useState(false)
   const [query, setQuery] = useState('')
   const [messages, setMessages] = useState([])
   const [auditVersions, setAuditVersions] = useState([])
@@ -720,6 +723,9 @@ function App() {
               tableData={tableData}
               evmMethodology={evmMethodology}
               setEvmMethodology={setEvmMethodology}
+              showActivityCodeColumn={showActivityCodeColumn}
+              setShowActivityCodeColumn={setShowActivityCodeColumn}
+              onOpenActivityCodeSettings={() => setShowActivityCodeSettings(true)}
             />
             {viewerTable === 'RESOURCES' ? (
               <ResourceView context="controller" />
@@ -743,6 +749,7 @@ function App() {
                 hasProject={controllerBaselineLoaded}
                 isTableLoading={isTableLoading}
                 evmMethodology={evmMethodology}
+                showActivityCodeColumn={showActivityCodeColumn}
               />
             )}
             
@@ -765,11 +772,18 @@ function App() {
         ) : null}
       </div>
 
+      <ActivityCodeSettingsModal
+        isOpen={showActivityCodeSettings}
+        onClose={() => setShowActivityCodeSettings(false)}
+        versionId={selectedControllerVersionId}
+        context="controller"
+      />
+
       {/* UX validation modals */}
-      <UploadWarningModal 
-        warning={uploadWarning} 
-        onContinue={handleUploadWarningContinue} 
-        onCancel={() => setUploadWarning(null)} 
+      <UploadWarningModal
+        warning={uploadWarning}
+        onContinue={handleUploadWarningContinue}
+        onCancel={() => setUploadWarning(null)}
       />
       <UploadErrorModal 
         error={uploadError} 

@@ -7,8 +7,8 @@ stable across uploads (a task_id from the baseline export can collide with
 or simply not match the "same" activity's task_id in the update export,
 even though its task_code is unchanged) — and writes one DS8 `changes` row
 per detected difference: activity added/deleted, duration/date/constraint/
-calendar field changes on matching activities, and relationship added/
-removed/type-changed/lag-changed.
+calendar field changes on matching activities, relationship added/
+removed/type-changed/lag-changed, and activity code reassignment (B-204).
 
 Diffs off the pristine raw TASK/TASKPRED dataframes (version['df']['task'] /
 ['taskpred'], singular keys — built once from the raw XER records and never
@@ -277,6 +277,83 @@ def _diff_relationships(base_map: Dict, upd_map: Dict, hpd: float) -> List[Dict]
     return changes
 
 
+def _build_activity_code_map(tables: Dict, task_id_to_code: Dict) -> Dict[str, Dict[str, List[str]]]:
+    """task_code -> {code_type_name: sorted [value_names]}, for one version's
+    pristine TASKACTV/ACTVCODE/ACTVTYPE tables (B-204). Keyed by task_code (via
+    this version's own task_id -> task_code map, same resolution diff_snapshots
+    already builds for relationships) rather than task_id, for the same
+    cross-export instability reason as everywhere else in this module — NOT a
+    reuse of XERDataStore._build_activity_codes_map, which is task_id-keyed.
+    Values are sorted so value-set comparison in _diff_activity_codes is
+    independent of row order between the two XER exports."""
+    taskactv = tables.get('TASKACTV')
+    actvcode = tables.get('ACTVCODE')
+    actvtype = tables.get('ACTVTYPE')
+    if not taskactv or not actvcode or not actvtype:
+        return {}
+
+    taskactv_df = pd.DataFrame(taskactv)
+    actvcode_df = pd.DataFrame(actvcode)
+    actvtype_df = pd.DataFrame(actvtype)
+    if taskactv_df.empty or actvcode_df.empty or actvtype_df.empty:
+        return {}
+
+    try:
+        merged = taskactv_df.merge(
+            actvcode_df[['actv_code_id', 'actv_code_name']], on='actv_code_id', how='left'
+        )
+        merged = merged.merge(
+            actvtype_df[['actv_code_type_id', 'actv_code_type']], on='actv_code_type_id', how='left'
+        )
+        merged['actv_code_type'] = merged['actv_code_type'].astype(str).str.strip()
+        merged['actv_code_name'] = merged['actv_code_name'].astype(str).str.strip()
+        merged['task_code'] = merged['task_id'].map(task_id_to_code)
+        merged = merged.dropna(subset=['task_code'])
+
+        result: Dict[str, Dict[str, List[str]]] = {}
+        for _, row in merged.iterrows():
+            result.setdefault(row['task_code'], {}).setdefault(row['actv_code_type'], []).append(row['actv_code_name'])
+        for types in result.values():
+            for type_name in types:
+                types[type_name] = sorted(types[type_name])
+        return result
+    except Exception:
+        return {}
+
+
+def _diff_activity_codes(base_map: Dict, upd_map: Dict) -> List[Dict]:
+    """Detects activity-code reassignment between baseline and update, for
+    activities present in both (added/deleted activities are already fully
+    covered by _diff_activities — this only handles 'same activity, code
+    assignment changed', e.g. moved from Sector 1A to Sector 1B, or a
+    multi-select category's value set changed)."""
+    changes: List[Dict] = []
+    for code in set(base_map) & set(upd_map):
+        b_types, u_types = base_map[code], upd_map[code]
+        for type_name in set(b_types) | set(u_types):
+            old_vals = b_types.get(type_name, [])
+            new_vals = u_types.get(type_name, [])
+            if old_vals == new_vals:
+                continue
+
+            if not old_vals and new_vals:
+                change_type = "activity_code_added"
+            elif old_vals and not new_vals:
+                change_type = "activity_code_removed"
+            else:
+                change_type = "activity_code_changed"
+
+            changes.append(_change_row(
+                change_type, "activity_code", code, field_changed=type_name,
+                old_value=old_vals, new_value=new_vals,
+                narrative_hint=(
+                    f"Activity code '{type_name}' changed from "
+                    f"{', '.join(old_vals) or '(none)'} to {', '.join(new_vals) or '(none)'} for {code}."
+                ),
+            ))
+    return changes
+
+
 def diff_snapshots(baseline: Dict, update: Dict) -> List[Dict]:
     """Pure diff between two already-loaded version dicts (as returned by
     XERDataStore.get_version/get_baseline) — no DB access, no project/
@@ -312,9 +389,12 @@ def diff_snapshots(baseline: Dict, update: Dict) -> List[Dict]:
     upd_activity_map = _build_activity_map(upd_task_df, upd_cal_map)
     base_rel_map = _build_relationship_map(base_pred_df, base_id_to_code)
     upd_rel_map = _build_relationship_map(upd_pred_df, upd_id_to_code)
+    base_actv_code_map = _build_activity_code_map(baseline.get("data", {}).get("tables", {}), base_id_to_code)
+    upd_actv_code_map = _build_activity_code_map(update.get("data", {}).get("tables", {}), upd_id_to_code)
 
     rows = _diff_activities(base_activity_map, upd_activity_map, hpd)
     rows += _diff_relationships(base_rel_map, upd_rel_map, hpd)
+    rows += _diff_activity_codes(base_actv_code_map, upd_actv_code_map)
     return rows
 
 

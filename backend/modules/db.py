@@ -82,6 +82,33 @@ _CREATE_CHANGES_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_changes_type ON changes(org_id, project_id, change_type);",
 )
 
+_CREATE_ACTIVITY_CODE_CONFIG_TABLE = """
+CREATE TABLE IF NOT EXISTS activity_code_config (
+    config_id      TEXT NOT NULL,
+    org_id         TEXT NOT NULL,
+    project_id     TEXT NOT NULL,
+    config_type    TEXT NOT NULL,
+    canonical_name TEXT NOT NULL,
+    raw_name       TEXT NOT NULL,
+    value_json     TEXT,
+    source         TEXT NOT NULL,
+    updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (org_id, project_id, config_type, raw_name)
+);
+"""
+# Keyed by raw_name (the detected category as it appears in this project's XER),
+# not canonical_name — the identity being configured is "this raw category has
+# one current canonical mapping", editable over time. Keying by canonical_name
+# instead would let a user "rename" a category's mapping into a second row
+# rather than replacing the first.
+# config_type: 'synonym' (B-204, activity-code category name normalization) today;
+# reserved for future config_type values (e.g. zone/trade mapping, B-205) without
+# a schema change — value_json is an unused free-form payload slot until then.
+
+_CREATE_ACTIVITY_CODE_CONFIG_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_activity_code_config_project ON activity_code_config(org_id, project_id, config_type);",
+)
+
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +126,9 @@ def init_db() -> None:
             conn.execute(stmt)
         conn.execute(_CREATE_CHANGES_TABLE)
         for stmt in _CREATE_CHANGES_INDEXES:
+            conn.execute(stmt)
+        conn.execute(_CREATE_ACTIVITY_CODE_CONFIG_TABLE)
+        for stmt in _CREATE_ACTIVITY_CODE_CONFIG_INDEX:
             conn.execute(stmt)
         conn.commit()
     finally:
@@ -400,6 +430,60 @@ def delete_changes_for_pair(project_id: str, from_snapshot_id: str, to_snapshot_
         return cur.rowcount
     finally:
         conn.close()
+
+
+def upsert_activity_code_config(row: Dict[str, Any]) -> str:
+    """Inserts or updates one activity-code config row (e.g. a canonical-name
+    synonym mapping for one raw category name in one project). Auto-suggest
+    (source='auto_suggested') must never clobber a user's manual edit — the
+    caller is responsible for checking existing rows before calling this with
+    source='auto_suggested' (see suggest_synonyms in activity_code_config.py);
+    this function itself always upserts unconditionally once called."""
+    row = dict(row)
+    row.setdefault("config_id", str(uuid.uuid4()))
+    row.setdefault("org_id", "local")
+    row.setdefault("value_json", None)
+    if row.get("value_json") is not None and not isinstance(row["value_json"], str):
+        row["value_json"] = json.dumps(row["value_json"])
+
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO activity_code_config
+                (config_id, org_id, project_id, config_type, canonical_name, raw_name, value_json, source, updated_at)
+            VALUES (:config_id, :org_id, :project_id, :config_type, :canonical_name, :raw_name, :value_json, :source, CURRENT_TIMESTAMP)
+            ON CONFLICT(org_id, project_id, config_type, raw_name) DO UPDATE SET
+                canonical_name = excluded.canonical_name,
+                value_json = excluded.value_json,
+                source = excluded.source,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            row,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return row["config_id"]
+
+
+def get_activity_code_config(project_id: str, config_type: str = "synonym") -> List[Dict[str, Any]]:
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "SELECT * FROM activity_code_config WHERE project_id = ? AND config_type = ? ORDER BY raw_name",
+            (project_id, config_type),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    results = []
+    for row in rows:
+        result = dict(row)
+        if result.get("value_json"):
+            result["value_json"] = json.loads(result["value_json"])
+        results.append(result)
+    return results
 
 
 def list_changes_for_pair(

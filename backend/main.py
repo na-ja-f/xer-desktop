@@ -12,11 +12,12 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
 
 from modules.extractor import CompleteXERExtractor
 from modules.analyzer import XERAnalyzer
-from modules.db import init_db, get_findings_history, get_findings_for_snapshot
+from modules.db import init_db, get_findings_history, get_findings_for_snapshot, get_activity_code_config, upsert_activity_code_config
 from modules.findings import write_findings_for_version, project_identity
 from modules.changes import write_changes_for_version
 from modules.forensic import write_forensic_findings_for_version
 from modules.narrative import generate_audit_narrative
+from modules.activity_code_config import suggest_synonyms
 
 app = FastAPI()
 
@@ -172,6 +173,12 @@ async def upload_xer(
             print(f"DS7 forensic findings written: {forensic_written}")
         except Exception as e:
             print(f"WARNING: DS7 forensic findings write failed: {e}")
+
+        try:
+            suggested = suggest_synonyms(analyzer.data_store, version_id, context)
+            print(f"Activity code synonyms auto-suggested: {len(suggested)}")
+        except Exception as e:
+            print(f"WARNING: Activity code synonym auto-suggest failed: {e}")
 
         stats = analyzer.get_basic_stats(context=context)
         os.remove(temp_path)
@@ -329,6 +336,69 @@ async def get_resources_load(context: str = "audit"):
     if not result.get("success"):
         raise HTTPException(status_code=404, detail=result.get("error", "No data"))
     return result
+
+
+# ── Activity Code Endpoints (B-204) ───────────────────────────────────────────
+@app.get("/activity-codes/types")
+async def get_activity_code_types_endpoint(context: str = "audit", scope: Optional[str] = None):
+    """Discovery: returns all Activity Code Types with scope + value counts."""
+    result = analyzer.get_activity_code_types_tool(context=context, scope=scope)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "No data"))
+    return result
+
+@app.get("/activity-codes/values")
+async def get_activity_code_values_endpoint(code_type: str, context: str = "audit"):
+    """Discovery: returns all values (+ hierarchy) for one code type."""
+    result = analyzer.get_activity_code_values(code_type=code_type, context=context)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Not found"))
+    return result
+
+@app.get("/activity-codes/activities")
+async def get_activities_by_activity_code_endpoint(code_type: str = "", code_value: str = "", rollup: bool = False, exact_match: bool = False, limit: int = 100, context: str = "audit"):
+    """Query: returns activities filtered by code type/value."""
+    return analyzer.get_activities_by_code(code_type=code_type, code_value=code_value, rollup=rollup, exact_match=exact_match, limit=limit, context=context)
+
+@app.get("/activity-codes/summary")
+async def get_activity_code_summary_endpoint(code_type: str, rollup: bool = True, context: str = "audit"):
+    """Query: per-value counts (direct + deduped rollup) for one code type."""
+    result = analyzer.get_activity_code_summary(code_type=code_type, rollup=rollup, context=context)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Not found"))
+    return result
+
+@app.get("/activity-codes/config")
+async def get_activity_code_config_endpoint(version_id: Optional[str] = None, context: str = "audit"):
+    """Returns the current canonical-name synonym mappings (auto-suggested and/or
+    user-overridden) for the active project, for the Settings modal to display."""
+    version = analyzer.data_store.get_version(version_id, context=context)
+    if not version:
+        raise HTTPException(status_code=404, detail="No active version for this context")
+    project_id, _ = project_identity(version, data_store=analyzer.data_store, context=context)
+    return {"success": True, "project_id": project_id, "config": get_activity_code_config(project_id)}
+
+@app.post("/activity-codes/config")
+async def update_activity_code_config_endpoint(
+    canonical_name: str = Form(...),
+    raw_name: str = Form(...),
+    version_id: Optional[str] = Form(None),
+    context: str = Form("audit"),
+):
+    """User override of a canonical-name mapping, from the Settings modal.
+    Always wins over future auto-suggestions for this raw_name."""
+    version = analyzer.data_store.get_version(version_id, context=context)
+    if not version:
+        raise HTTPException(status_code=404, detail="No active version for this context")
+    project_id, _ = project_identity(version, data_store=analyzer.data_store, context=context)
+    upsert_activity_code_config({
+        "project_id": project_id,
+        "config_type": "synonym",
+        "canonical_name": canonical_name,
+        "raw_name": raw_name,
+        "source": "user_override",
+    })
+    return {"success": True}
 
 
 # ── B-042: Dashboard Endpoint ─────────────────────────────────────────────────

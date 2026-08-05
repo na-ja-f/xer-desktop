@@ -79,9 +79,11 @@ AVAILABLE TOOLS:
       - `month`: 1-12 or None.
       - `year`: 4-digit year or None.
 29. check_bei() - Baseline Execution Index (DCMA point 14): fraction of activities baseline-scheduled to finish by the data date that actually finished by the data date. DCMA target >= 0.95. Use when user asks "what's our BEI", "baseline execution index", "are we executing to plan", "execution discipline". Requires an update file with progress data — if only the baseline is loaded, the tool itself returns the reason rather than a fabricated value; just relay that reason, do not guess a number.
+30. get_activity_code_summary(code_type: str, rollup: bool) - Aggregate/group activity counts by EVERY value within one Activity Code category in a single call (e.g. "how many activities per Sector", "breakdown by Discipline", "counts by Level"). Use when the user asks for counts *per value* across a whole category, not a filtered list of activities for one value. rollup=True (default) includes descendant counts per hierarchy value, deduplicated.
 
 ACTIVITY CODE ROUTING RULES:
 - When a user asks about "Construction activities", "Sewer activities", "Sector 1A", or any category that matches a detected Activity Code Type or Value, route to get_activities_by_code.
+- When a user asks for a per-value breakdown/count across a whole category (e.g. "how many activities in each sector", "breakdown by discipline", "counts per level"), route to get_activity_code_summary with code_type set to the matched category name.
 - NEVER guess or auto-fill 'code_type' unless the user explicitly names it. If they just say "Show Construction activities", pass code_value="Construction" and code_type="".
 - When a user asks "which level/type/area/utility does activity X belong to?", route to get_activity_details — the response will include Activity Codes.
 - When a user asks "show me all code types" or "what activity codes are in this project?", route to get_activity_code_types.
@@ -153,6 +155,7 @@ GUIDELINES:
   ├ SECTOR 1A
   └ SECTOR 1B
 - WBS BRANCH STATS (template_type: wbs_branch_stats): When data comes from get_wbs_branch_stats, you MUST format as a markdown table with columns: WBS Branch | Activities | Delayed | Critical | Variance Days | Status. Add a prominent note at the top: "⚠️ Earned Value (SPI/CPI) is not available for this project — all activities use Duration % Complete. The Status Tag is derived from delay ratio and critical path ratio." Sort Critical/Delayed rows first. Explain the status logic briefly.
+- ACTIVITY CODE SUMMARY (from get_activity_code_summary): You MUST format as a markdown table with columns: Value | Direct | Rolled Up (incl. descendants) | Hierarchy Path. Only include the "Rolled Up" and "Hierarchy Path" columns if any row has a non-zero descendant_count; otherwise a simpler Value | Count table is fine. Never sum rolled_up_count across rows and present it as a category total — descendant counts overlap between rows, only direct_count sums cleanly to `total_activities_with_this_type`.
 - GREETINGS & CONVERSATION: If the user says "Hello", "Hi", "Good morning", or gives a standard greeting, you MUST reply warmly and professionally. Greet them back, state that you are their XerAgent planning assistant, and suggest a few specific things they can ask you about the schedule (e.g., critical path, delays, health score). Do NOT trigger the scope refusal. Do NOT claim that no data is loaded just because the data array is empty; a greeting simply doesn't require querying activities.
 - SCOPE REFUSAL: You only answer construction scheduling or project control questions related to the loaded project (e.g., '{PROJECT_NAME}'). If the user asks about weather, news, sports, or general off-topic questions, you MUST refuse to answer. EXCEPTIONS: Any question mentioning calendars, holidays, workweeks, or specific working exceptions (e.g., "Ramadan", "Summer", "Christmas", "Eid") MUST NOT trigger a scope refusal. These are valid schedule inquiries. For off-topic questions only, use exactly this pattern for your summary: "I help with construction schedule questions for the '{PROJECT_NAME}' project. I don't answer weather, news, or general questions. Try asking about activities, variance, critical path, or trade scope status."
 - CALENDAR GROUNDING: Never estimate calendar values, working days, or exception counts. Never use words like "typically", "usually", "assuming", "would have", "might have", "probably", or "generally". Rely STRICTLY on the injected backend payload. If a requested calendar does not exist, explicitly say: "No such calendar exists in the uploaded XER." If the calendar exists but has no exceptions for the requested date, explicitly state: "No exceptions match the specified date criteria for this calendar." Do NOT estimate. If the user asks about 'Ramadan' and no matching calendar/exception is found, you MUST state exactly: "No calendar, exception, or holiday containing 'Ramadan' exists in the uploaded XER. Therefore the system cannot determine a Ramadan-specific calendar."
@@ -496,6 +499,12 @@ class XERAnalyzer:
                 limit=args.get("limit", 100),
                 context=ctx, version_id=selected_version
             )
+        elif tool == "get_activity_code_summary":
+            result = self.get_activity_code_summary(
+                code_type=args.get("code_type", ""),
+                rollup=args.get("rollup", True),
+                context=ctx, version_id=selected_version
+            )
         elif tool == "get_wbs_branch_stats":
             result = self.get_wbs_branch_stats(context=ctx, version_id=selected_version)
         elif tool == "get_baseline_pairing_status":
@@ -812,8 +821,7 @@ class XERAnalyzer:
 
         hpd = source.get("hours_per_day", 8)
         analysis = self.data_store.get_deterministic_analysis(version_id=source['id'], context=context).get("activityAnalysis", {})
-        code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context)
-        
+
         # B-041: Get calendar map for enrichment
         cal_map = self.data_store.get_calendar_map(version_id=version_id, context=context)
         
@@ -830,12 +838,9 @@ class XERAnalyzer:
             }
             display_status = status_map.get(status_enum, "Not Started")
 
-            codes_payload = {}
-            for k, v in act_analysis.get("activity_codes", {}).items():
-                codes_payload[k] = {
-                    "value": v,
-                    "scope": code_types.get(k, {}).get("scope", "Global")
-                }
+            # activity_codes is already {type: [{value, scope, actv_code_id}, ...]} —
+            # scope rides along per value, no need to re-derive it from code_types here.
+            codes_payload = act_analysis.get("activity_codes", {})
 
             # B-041: Calendar enrichment
             cal_id = str(r.get("clndr_id", ""))
@@ -925,12 +930,28 @@ class XERAnalyzer:
             codes = a.get("activity_codes", {})
             if not codes:
                 continue
-                
+
             matched = False
-            
+
             if code_type and code_value:
-                for t, v in codes.items():
+                for t, value_list in codes.items():
                     if norm(code_type) in norm(t) or norm(t) in norm(code_type):
+                        for vobj in value_list:
+                            v = vobj["value"]
+                            if exact_match:
+                                if any(v.lower() == tv for tv in target_values):
+                                    matched = True
+                                    break
+                            else:
+                                if any(tv in v.lower() for tv in target_values):
+                                    matched = True
+                                    break
+                        if matched:
+                            break
+            elif code_value:
+                for value_list in codes.values():
+                    for vobj in value_list:
+                        v = vobj["value"]
                         if exact_match:
                             if any(v.lower() == tv for tv in target_values):
                                 matched = True
@@ -939,16 +960,8 @@ class XERAnalyzer:
                             if any(tv in v.lower() for tv in target_values):
                                 matched = True
                                 break
-            elif code_value:
-                for v in codes.values():
-                    if exact_match:
-                        if any(v.lower() == tv for tv in target_values):
-                            matched = True
-                            break
-                    else:
-                        if any(tv in v.lower() for tv in target_values):
-                            matched = True
-                            break
+                    if matched:
+                        break
             elif code_type:
                 for t in codes.keys():
                     if norm(code_type) in norm(t) or norm(t) in norm(code_type):
@@ -1154,30 +1167,27 @@ class XERAnalyzer:
             "template_type": "list"
         }
 
+    def _resolve_code_type(self, code_type: str, code_types: Dict) -> Optional[str]:
+        """Matches a user-supplied code_type name against a code_types dict's keys:
+        exact normalized match first, then substring match. Shared by
+        get_activity_code_values and get_activity_code_summary."""
+        def norm(s): return s.strip().lower().replace(" ", "")
+        for t in code_types.keys():
+            if norm(t) == norm(code_type):
+                return t
+        for t in code_types.keys():
+            if norm(code_type) in norm(t) or norm(t) in norm(code_type):
+                return t
+        return None
+
     def get_activity_code_values(self, code_type: str, context: str = "audit", version_id: Optional[str] = None) -> Dict:
         """Returns all specific values for a given Activity Code Type."""
         code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context)
         if not code_types:
             return {"success": False, "error": "No Activity Codes found in the loaded schedule."}
-            
-        matched_type = None
-        
-        # Helper to normalize strings for comparison
-        def norm(s): return s.strip().lower().replace(" ", "")
-        
-        # 1. Try exact normalized match first
-        for t in code_types.keys():
-            if norm(t) == norm(code_type):
-                matched_type = t
-                break
-                
-        # 2. Try substring match if exact fails
-        if not matched_type:
-            for t in code_types.keys():
-                if norm(code_type) in norm(t) or norm(t) in norm(code_type):
-                    matched_type = t
-                    break
-                
+
+        matched_type = self._resolve_code_type(code_type, code_types)
+
         if not matched_type:
             return {
                 "success": False, 
@@ -1431,6 +1441,85 @@ class XERAnalyzer:
             "template_type": "list"
         }
 
+    def get_activity_code_summary(self, code_type: str, rollup: bool = True, context: str = "audit", version_id: Optional[str] = None) -> Dict:
+        """Group/aggregate: per-value activity counts within one Activity Code
+        category — 'how many activities per Sector', 'breakdown by Discipline'.
+        Unlike get_activities_by_code (one type=value filter -> a list of
+        activities), this returns every value's count in one call.
+
+        Each value's rolled_up_count already reflects the manager's dedup rule
+        (parent total = direct + descendants, activities tagged at both levels
+        counted once) for free, since it reuses _filter_by_code's rollup path,
+        which unions matches into a dict keyed by activity id.
+        """
+        source = self.data_store.get_latest(context=context, version_id=version_id)
+        if not source:
+            return {"success": False, "error": "No schedule data loaded."}
+
+        all_code_types = self.data_store.get_activity_code_types(version_id=version_id, context=context)
+        if not all_code_types:
+            return {"success": False, "error": "No Activity Codes found in the loaded schedule."}
+
+        matched_type = self._resolve_code_type(code_type, all_code_types)
+        if not matched_type:
+            return {
+                "success": False,
+                "error": f"Activity Code Type '{code_type}' not found.",
+                "available_types": list(all_code_types.keys())
+            }
+
+        info = all_code_types[matched_type]
+        values = info["values"]
+        hierarchy = info.get("hierarchy", {})
+
+        vid = source['id']
+        analysis = self.data_store.get_deterministic_analysis(version_id=vid, context=context)
+        acts = analysis.get("activityAnalysis", {})
+
+        data = []
+        for v in values:
+            direct = self._filter_by_code(
+                acts, {"code_type": matched_type, "code_value": v, "rollup": False, "exact_match": True},
+                code_types=all_code_types
+            )
+            direct_count = len(direct)
+            if rollup:
+                rolled_up = self._filter_by_code(
+                    acts, {"code_type": matched_type, "code_value": v, "rollup": True, "exact_match": True},
+                    code_types=all_code_types
+                )
+                rolled_up_count = len(rolled_up)
+            else:
+                rolled_up_count = direct_count
+
+            data.append({
+                "value": v,
+                "direct_count": direct_count,
+                "rolled_up_count": rolled_up_count,
+                "descendant_count": rolled_up_count - direct_count,
+                "hierarchy_path": hierarchy.get(v, {}).get("hierarchy_path", v)
+            })
+
+        data.sort(key=lambda d: d["rolled_up_count"], reverse=True)
+        total_activities_with_type = sum(1 for a in acts.values() if matched_type in a.get("activity_codes", {}))
+
+        return {
+            "success": True,
+            "total_count": len(data),
+            "displayed_count": len(data),
+            "is_truncated": False,
+            "data": data,
+            "display_items": data,
+            "all_items": data,
+            "stats": {
+                "code_type": matched_type,
+                "scope": info["scope"],
+                "total_values": len(values),
+                "total_activities_with_this_type": total_activities_with_type,
+                "total_project_activities": len(acts)
+            },
+            "template_type": "list"
+        }
 
     def get_negative_float_activities(self, limit: int = 20, context: str = "audit", wbs_filter: Optional[str] = None, version_id: Optional[str] = None) -> Dict:
         source = self.data_store.get_latest(context=context, version_id=version_id)

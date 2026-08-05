@@ -6,7 +6,14 @@ const formatCurrency = (val) => {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(val);
 };
 
-const TaskRow = React.memo(({ task, formatP6Date, evmMethodology, level }) => {
+const formatActivityCodes = (codes) => {
+  if (!codes || Object.keys(codes).length === 0) return '';
+  return Object.values(codes)
+    .map(valueList => (Array.isArray(valueList) ? valueList : [valueList]).map(v => (v && typeof v === 'object') ? v.value : v).join(', '))
+    .join(' | ');
+};
+
+const TaskRow = React.memo(({ task, formatP6Date, evmMethodology, level, showActivityCodeColumn }) => {
   const [showDetails, setShowDetails] = useState(false);
   const [showCalendarDetails, setShowCalendarDetails] = useState(false);
   const analysis = task._analysis || {};
@@ -54,10 +61,15 @@ const TaskRow = React.memo(({ task, formatP6Date, evmMethodology, level }) => {
             {task.task_name}
           </div>
         </div>
+        {showActivityCodeColumn && (
+          <div className="w-32 shrink-0 px-1 text-[9px] text-gray-600 truncate" title={formatActivityCodes(analysis.activity_codes)}>
+            {formatActivityCodes(analysis.activity_codes)}
+          </div>
+        )}
         <div className="w-24 shrink-0 px-1 flex justify-start">
           <span title={
-            isAtRisk 
-              ? `At Risk: slip is ${analysis.forecast_slip_days} days (threshold: ${analysis.threshold_days}d)` 
+            isAtRisk
+              ? `At Risk: slip is ${analysis.forecast_slip_days} days (threshold: ${analysis.threshold_days}d)`
               : (analysis.delay_days !== null && analysis.delay_days !== undefined ? `Delay: ${analysis.delay_days} days` : 'Delay: N/A')
           } className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-tight shadow-sm cursor-help ${statusConfig.color}`}>
             {statusConfig.icon}
@@ -239,9 +251,10 @@ const TaskRow = React.memo(({ task, formatP6Date, evmMethodology, level }) => {
             <div className="mt-2 pt-2 border-t border-gray-200">
               <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-200 pb-1 mb-2">Activity Codes</h4>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                {Object.entries(analysis.activity_codes).map(([type, valObj]) => {
-                  const val = typeof valObj === 'object' && valObj !== null ? valObj.value : valObj;
-                  const scope = typeof valObj === 'object' && valObj !== null ? valObj.scope : '';
+                {Object.entries(analysis.activity_codes).map(([type, valueList]) => {
+                  const values = Array.isArray(valueList) ? valueList : [valueList];
+                  const scope = (typeof values[0] === 'object' && values[0] !== null) ? values[0].scope : '';
+                  const val = values.map(v => (typeof v === 'object' && v !== null) ? v.value : v).join(', ');
                   return (
                   <div key={type} className="bg-white border border-gray-200 rounded-lg px-3 py-2 shadow-sm">
                     <div className="flex justify-between items-center mb-0.5">
@@ -387,7 +400,7 @@ const WbsCriticalityBadge = ({ tag }) => {
   );
 };
 
-const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, showActivities, scheduleMode, evmMethodology }) => {
+const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, showActivities, scheduleMode, evmMethodology, showActivityCodeColumn }) => {
   const [isExpanded, setIsExpanded] = useState(level === 0 || defaultExpanded);
   
   const hasChildren = node.children && node.children.length > 0;
@@ -511,6 +524,10 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
           </>
         )}
 
+        {/* Activity Code(s) spacer — WBS nodes have no codes of their own; keeps
+            alignment with the activity-code column shown on activity rows below */}
+        {showActivityCodeColumn && <div className="w-32 shrink-0" />}
+
         {/* Status Column (empty spacer, replaced by badge) */}
         <div className="w-0 shrink-0" />
 
@@ -555,6 +572,7 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
                     <div className="flex-1 px-3">Activity Name</div>
                   </div>
                   {/* RIGHT PANEL HEADER for Activities */}
+                  {showActivityCodeColumn && <div className="w-32 shrink-0 px-1">Activity Code(s)</div>}
                   <div className="w-24 shrink-0 px-1">Status</div>
                   <div className="w-14 shrink-0 px-1 text-center">Dur</div>
                   <div className="w-20 shrink-0 px-1 text-center">ES</div>
@@ -583,7 +601,7 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
                </div>
                <div className="bg-white">
                  {node.activities.map(task => (
-                   <TaskRow key={task.task_id} task={task} formatP6Date={formatP6Date} evmMethodology={evmMethodology} level={level} />
+                   <TaskRow key={task.task_id} task={task} formatP6Date={formatP6Date} evmMethodology={evmMethodology} level={level} showActivityCodeColumn={showActivityCodeColumn} />
                  ))}
                </div>
             </div>
@@ -598,6 +616,7 @@ const WBSTreeNode = React.memo(({ node, level, formatP6Date, defaultExpanded, sh
               showActivities={showActivities}
               scheduleMode={scheduleMode}
               evmMethodology={evmMethodology}
+              showActivityCodeColumn={showActivityCodeColumn}
             />
           ))}
         </div>
@@ -620,7 +639,8 @@ const ControllerTable = ({
   getHeaderLabel,
   hasProject,
   isTableLoading,
-  evmMethodology
+  evmMethodology,
+  showActivityCodeColumn
 }) => {
   const isHierarchy = tableData.table === 'HIERARCHY';
   const showActivities = viewerTable === 'TASK';
@@ -680,6 +700,7 @@ Float Consumption < 50%`}>Float Risk</div>
                        <div className="w-24 shrink-0 px-1 text-center">Criticality</div>
                      </>
                    )}
+                   {showActivityCodeColumn && <div className="w-32 shrink-0 px-1 text-center">Activity Code(s)</div>}
                    <div className="w-0 shrink-0" />
                    <div className="w-14 shrink-0 px-1 text-center">Dur</div>
                    <div className="w-20 shrink-0 px-1 text-center">ES</div>
@@ -713,6 +734,7 @@ Float Consumption < 50%`}>Float Risk</div>
                        showActivities={showActivities}
                        scheduleMode={tableData.schedule_mode || 'BASELINE_ONLY'}
                        evmMethodology={evmMethodology}
+                       showActivityCodeColumn={showActivityCodeColumn}
                      />
                    ))
                  ) : (

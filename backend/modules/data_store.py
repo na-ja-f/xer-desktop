@@ -6,6 +6,10 @@ from . import db
 from .findings import project_identity
 from .audit_score import compute_hero, compute_trend
 
+# Shared by _build_activity_codes_map and get_activity_code_types so the two
+# copies of this mapping (per-task join vs. type/value discovery) can't drift.
+ACTV_SCOPE_MAP = {"AS_Project": "Project", "AS_Global": "Global", "AS_EPS": "EPS"}
+
 class XERDataStore:
     """Stores all XER data with pre-computed statistics"""
 
@@ -215,13 +219,13 @@ class XERDataStore:
                 dfs[table_name.lower()] = pd.DataFrame(records)
         return dfs
 
-    def _build_activity_codes_map(self, source: Dict) -> Dict[str, Dict[str, str]]:
+    def _build_activity_codes_map(self, source: Dict) -> Dict[str, Dict[str, List[Dict]]]:
         """Joins TASKACTV → ACTVCODE → ACTVTYPE to build a per-task activity code map.
-        Returns: {task_id: {code_type_name: code_value_name, ...}, ...}
+        Returns: {task_id: {code_type_name: [{"value": ..., "scope": ..., "actv_code_id": ...}, ...]}, ...}
 
-        ASSUMPTION: P6 enforces a 1:1 relationship between (task_id, code_type) and code_value.
-        Verified against real XER data: 15,847 assignments with 0 duplicates.
-        If a duplicate is ever encountered, the last value wins (dict overwrite).
+        Values are always a list, even for single-value categories — this handles P6's
+        multi-select categories (an activity can carry more than one value in the same
+        code type) without every consumer needing to branch on str-vs-list.
 
         NOTE: This runs per source (per version). Baseline and update files maintain
         independent Activity Code structures — they are never merged or shared.
@@ -256,22 +260,39 @@ class XERDataStore:
                 on='actv_code_id',
                 how='left'
             )
-            # 2. Join ACTVTYPE to get type names
+            # 2. Join ACTVTYPE to get type names + scope
+            type_cols = ['actv_code_type_id', 'actv_code_type']
+            if 'actv_code_type_scope' in actvtype_df.columns:
+                type_cols.append('actv_code_type_scope')
             merged = merged.merge(
-                actvtype_df[['actv_code_type_id', 'actv_code_type']],
+                actvtype_df[type_cols],
                 on='actv_code_type_id',
                 how='left'
             )
             # 3. Trim whitespace from names
             merged['actv_code_type'] = merged['actv_code_type'].astype(str).str.strip()
             merged['actv_code_name'] = merged['actv_code_name'].astype(str).str.strip()
+            if 'actv_code_type_scope' in merged.columns:
+                merged['scope'] = merged['actv_code_type_scope'].map(ACTV_SCOPE_MAP).fillna("Global")
+            else:
+                merged['scope'] = "Global"
 
-            # 4. Group by task_id into {type: value} dicts
-            # P6 enforces 1:1 per (task, type), so dict() is safe.
-            # If duplicates ever exist, last value wins — this is intentional.
+            # 4. Group by task_id into {type: [{value, scope, actv_code_id}, ...]}
+            # Every (task_id, type) assignment is preserved — a category with
+            # multiple values per activity (multi-select) keeps all of them.
+            def build_type_map(group):
+                out = {}
+                for _, row in group.iterrows():
+                    out.setdefault(row['actv_code_type'], []).append({
+                        "value": row['actv_code_name'],
+                        "scope": row['scope'],
+                        "actv_code_id": str(row['actv_code_id']) if pd.notna(row['actv_code_id']) else None
+                    })
+                return out
+
             result = (
                 merged.groupby('task_id')
-                .apply(lambda x: dict(zip(x['actv_code_type'], x['actv_code_name'])))
+                .apply(build_type_map)
                 .to_dict()
             )
             return result
@@ -281,7 +302,8 @@ class XERDataStore:
             return {}
 
     def _inject_activity_codes(self, activity_analysis: Dict, source: Dict) -> Dict:
-        """Injects activity_codes into each activity in the activityAnalysis dict."""
+        """Injects activity_codes (see _build_activity_codes_map for shape) into each
+        activity in the activityAnalysis dict."""
         codes_map = self._build_activity_codes_map(source)
         if not codes_map:
             return activity_analysis
@@ -312,7 +334,7 @@ class XERDataStore:
             return {}
 
         try:
-            scope_map = {"AS_Project": "Project", "AS_Global": "Global", "AS_EPS": "EPS"}
+            scope_map = ACTV_SCOPE_MAP
             cols_to_merge = ['actv_code_type_id', 'actv_code_type']
             if 'actv_code_type_scope' in actvtype_df.columns:
                 cols_to_merge.append('actv_code_type_scope')
@@ -2079,7 +2101,8 @@ class XERDataStore:
                     'float_consumed_pct': safe_float(m.get('float_consumed_pct', 0)),
                     'float_risk': m.get('float_risk', 'Stable'),
                     'predecessors': source.get('dependency_graph', {}).get(tid, {}).get('predecessors', []),
-                    'successors': source.get('dependency_graph', {}).get(tid, {}).get('successors', [])
+                    'successors': source.get('dependency_graph', {}).get(tid, {}).get('successors', []),
+                    'activity_codes': m.get('activity_codes', {})
                 }
                 tasks.append(clean_rec)
 
@@ -2158,7 +2181,8 @@ class XERDataStore:
                             'classification': m.get('classification', 'ON_TRACK'),
                             'bl_float_days': float(m.get('bl_float_days') or 0),
                             'float_consumed_pct': float(m.get('float_consumed_pct') or 0),
-                            'float_risk': m.get('float_risk', 'Stable')
+                            'float_risk': m.get('float_risk', 'Stable'),
+                            'activity_codes': m.get('activity_codes', {})
                         }
                     }
                     if wid not in analytics_stubs_by_wbs:
