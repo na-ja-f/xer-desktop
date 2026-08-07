@@ -5,7 +5,7 @@ const { spawn, execSync } = require('child_process');
 const net = require('net');
 
 const isWindows = os.platform() === 'win32';
-const backendDir = path.join(__dirname, '..', 'backend');
+const backendDir = path.join(__dirname, '..', 'engine');
 const PORT = 8000;
 
 const pythonPath = isWindows 

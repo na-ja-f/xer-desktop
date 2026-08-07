@@ -10,7 +10,7 @@ set ROOT_DIR=%~dp0..
 set PYTHON_VENV=%ROOT_DIR%\venv_desktop\Scripts\python.exe
 
 :: 1. Compile Python Backend
-echo [1/3] Compiling Python Backend (PyInstaller)...
+echo [1/4] Compiling Python Backend (PyInstaller)...
 
 if not exist "%PYTHON_VENV%" (
     echo Python virtual environment not found at %PYTHON_VENV%
@@ -18,7 +18,7 @@ if not exist "%PYTHON_VENV%" (
     exit /b 1
 )
 
-cd /d "%ROOT_DIR%\backend"
+cd /d "%ROOT_DIR%\engine"
 
 :: Ensure pyinstaller is installed
 "%PYTHON_VENV%" -m pip install pyinstaller
@@ -32,8 +32,8 @@ if %errorlevel% neq 0 (
 cd /d "%ROOT_DIR%"
 
 :: 2. Build React Frontend
-echo [2/3] Building React Frontend...
-cd /d "%ROOT_DIR%\frontend"
+echo [2/4] Building React Frontend...
+cd /d "%ROOT_DIR%\app\renderer"
 call npm run build
 if %errorlevel% neq 0 (
     echo Error building frontend.
@@ -41,21 +41,25 @@ if %errorlevel% neq 0 (
 )
 cd /d "%ROOT_DIR%"
 
-:: 3. Package Electron Application
-echo [3/3] Packaging Electron Application...
-cd /d "%ROOT_DIR%\electron"
-:: Ensure electron-builder is installed locally if not in package.json
-call npm install electron-builder --save-dev
+:: 3. Compile Electron main/bridge TypeScript
+echo [3/4] Compiling Electron main/bridge TypeScript...
+call npx tsc -p tsconfig.electron.json
+if %errorlevel% neq 0 (
+    echo Error compiling Electron TypeScript.
+    exit /b %errorlevel%
+)
+
+:: 4. Package Electron Application
+echo [4/4] Packaging Electron Application...
 call npx electron-builder --win
 if %errorlevel% neq 0 (
     echo Error packaging Electron application.
     exit /b %errorlevel%
 )
-cd /d "%ROOT_DIR%"
 
 echo.
 echo ==========================================
-echo   Build Complete! 
-echo   Installer can be found in electron/dist/
+echo   Build Complete!
+echo   Installer can be found in dist/
 echo ==========================================
 pause

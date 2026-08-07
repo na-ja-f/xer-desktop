@@ -301,86 +301,75 @@ function App() {
     syncStats('controller')
   }, [selectedAuditVersionId, selectedControllerVersionId])
 
-  // Setup Effect (IPC Listeners)
+  // Setup Effect (bridge listeners)
   useEffect(() => {
-    if (typeof window !== 'undefined' && window.require) {
-      try {
-        const { ipcRenderer } = window.require('electron')
-        
-        const removeStatus = ipcRenderer.on('setup-status', (e, msg) => setSetupStatus(msg))
-        const removeError = ipcRenderer.on('setup-error', (e, err) => setSetupError(err))
-        const removeComplete = ipcRenderer.on('setup-complete', (e, data) => {
-          if (data && data.apiPort) {
-             // Point axios directly at the backend — no /api prefix needed (Vite proxy handles that in browser)
-             axios.defaults.baseURL = `http://127.0.0.1:${data.apiPort}`
-             // Override all calls to strip /api prefix for direct backend access
-             axios.interceptors.request.use((config) => {
-               if (config.url && config.url.startsWith('/api/')) {
-                 config.url = config.url.replace('/api/', '/')
-               }
-               return config
-             })
-          }
-          setIsSetupComplete(true)
-        })
-
-        return () => {
-          if (ipcRenderer.removeAllListeners) {
-            ipcRenderer.removeAllListeners('setup-status')
-            ipcRenderer.removeAllListeners('setup-error')
-            ipcRenderer.removeAllListeners('setup-complete')
-          }
+    if (typeof window !== 'undefined' && window.xerAgent) {
+      const offStatus = window.xerAgent.onSetupStatus((msg) => setSetupStatus(msg))
+      const offError = window.xerAgent.onSetupError((err) => setSetupError(err))
+      const offComplete = window.xerAgent.onSetupComplete((data) => {
+        if (data?.apiPort) {
+          // Point axios directly at the backend — no /api prefix needed (Vite proxy handles that in browser)
+          axios.defaults.baseURL = `http://127.0.0.1:${data.apiPort}`
+          // Override all calls to strip /api prefix for direct backend access
+          axios.interceptors.request.use((config) => {
+            if (config.url?.startsWith('/api/')) {
+              config.url = config.url.replace('/api/', '/')
+            }
+            return config
+          })
         }
-      } catch (err) {
-         setIsSetupComplete(true)
-      }
+        setIsSetupComplete(true)
+      })
+
+      return () => { offStatus(); offError(); offComplete() }
     } else {
-      // Browser fallback (use proxy or default 8000)
+      // Browser fallback (use proxy or default 8000) — plain web page, no bridge present
       setIsSetupComplete(true)
     }
   }, [])
 
   // Authentication Effect
   useEffect(() => {
-    let domainMatch = false;
-    let uName = 'User';
-    
-    try {
-      // Pull allowed domains from env (comma-separated), and add fallbacks dynamically
-      const envDomains = import.meta.env.VITE_ALLOWED_DOMAIN 
-        ? import.meta.env.VITE_ALLOWED_DOMAIN.split(',').map(d => d.trim().toLowerCase())
-        : [];
-      
-      const allowedDomains = [...envDomains, "ellisdon", "desktop-0qlhho9", "ellisdon.com"];
-      
-      if (typeof window !== 'undefined' && window.process && window.process.env) {
-        const platform = window.process.platform;
-        const uDomain = window.process.env.USERDOMAIN || '';
-        
-        if (window.require) {
-           try {
-             uName = window.require('os').userInfo().username;
-           } catch(e) {}
-        }
-        
-        // Allow bypass on Mac for development, otherwise strict array domain check
-        if (platform === 'darwin' || allowedDomains.includes(uDomain.toLowerCase()) || import.meta.env.DEV) {
-          domainMatch = true;
-        }
-      } else {
-        // Browser fallback
-        domainMatch = import.meta.env.DEV ? true : false;
-      }
-    } catch (err) {
-      console.error('Auth verification error', err);
-    }
+    let cancelled = false;
 
-    if (!domainMatch) {
-      setAuthError('Access restricted to EllisDon domain users');
-    } else {
-      setUserName(uName);
-      setIsAuthenticated(true);
-    }
+    // Pull allowed domains from env (comma-separated), and add fallbacks dynamically
+    const envDomains = import.meta.env.VITE_ALLOWED_DOMAIN
+      ? import.meta.env.VITE_ALLOWED_DOMAIN.split(',').map(d => d.trim().toLowerCase())
+      : [];
+    const allowedDomains = [...envDomains, "ellisdon", "desktop-0qlhho9", "ellisdon.com"];
+
+    (async () => {
+      let domainMatch = false;
+      let uName = 'User';
+
+      try {
+        if (typeof window !== 'undefined' && window.xerAgent) {
+          const { platform, userDomain, username } = await window.xerAgent.getUserContext();
+          uName = username || uName;
+
+          // Allow bypass on Mac for development, otherwise strict array domain check
+          if (platform === 'darwin' || allowedDomains.includes((userDomain || '').toLowerCase()) || import.meta.env.DEV) {
+            domainMatch = true;
+          }
+        } else {
+          // Browser fallback
+          domainMatch = import.meta.env.DEV ? true : false;
+        }
+      } catch (err) {
+        console.error('Auth verification error', err);
+      }
+
+      if (cancelled) return;
+
+      if (!domainMatch) {
+        setAuthError('Access restricted to EllisDon domain users');
+      } else {
+        setUserName(uName);
+        setIsAuthenticated(true);
+      }
+    })();
+
+    return () => { cancelled = true };
   }, []);
 
   useEffect(() => {

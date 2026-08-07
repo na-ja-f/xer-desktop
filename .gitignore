@@ -6,13 +6,11 @@
 
 # Node / JS
 node_modules/
-frontend/node_modules/
-electron/node_modules/
 dist/
 dist_*/
-backend/build/
-backend/*.spec
-frontend/dist/
+app/dist-electron/
+engine/build/
+engine/*.spec
 
 # Python
 __pycache__/
@@ -40,9 +38,9 @@ CLAUDE.md
 launch.json
 
 # Local SQLite pilot (DS7 findings, etc.)
-backend/data/
+engine/data/
 
-backend/local_tests/
+engine/local_tests/
 
 # Licensing private key — must never be committed (see licensing/README.md)
 licensing/private-key.pem

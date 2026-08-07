@@ -1,17 +1,51 @@
 {
   "name": "xeragent-workspace",
   "version": "1.0.0",
+  "main": "app/dist-electron/main/main.js",
   "scripts": {
-    "install-all": "npm install && cd frontend && npm install && cd ../electron && npm install",
+    "install-all": "npm install && cd app/renderer && npm install",
     "setup": "setup_windows.bat",
     "kill-ports": "node scripts/kill-ports.js",
+    "build-electron-ts": "tsc -p tsconfig.electron.json",
     "dev-backend": "node scripts/start-backend.js",
-    "dev-frontend": "cd frontend && npm run dev",
-    "dev-electron": "cd electron && npm start",
-    "dev": "npm run kill-ports && concurrently \"npm run dev-backend\" \"npm run dev-frontend\" \"npx wait-on http-get://127.0.0.1:8000/ && npm run dev-electron\""
+    "dev-frontend": "cd app/renderer && npm run dev",
+    "dev-electron": "npm run build-electron-ts && electron .",
+    "dev": "npm run kill-ports && concurrently \"npm run dev-backend\" \"npm run dev-frontend\" \"npx wait-on http-get://127.0.0.1:8000/ && npm run dev-electron\"",
+    "build-renderer": "cd app/renderer && npm run build"
   },
   "devDependencies": {
+    "@types/node": "^22.10.2",
     "concurrently": "^8.2.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.7.2",
     "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.ellisdon.xeragent",
+    "productName": "XER Schedule Assistant",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true
+    },
+    "extraResources": [
+      {
+        "from": "engine/dist",
+        "to": ".",
+        "filter": ["**/*"]
+      }
+    ],
+    "files": [
+      "package.json",
+      "app/dist-electron/**/*",
+      "app/renderer/dist/**/*"
+    ]
   }
 }
