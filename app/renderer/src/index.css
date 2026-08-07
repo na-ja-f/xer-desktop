@@ -1,5 +1,15 @@
+/* Must be the very first rule in the bundled stylesheet — @import is only
+   valid before all other rules, and any import nested inside styles/theme.css
+   or styles/tokens.css would no longer be "first" once inlined here. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 @import "tailwindcss";
+@import "./styles/theme.css";
+@import "./styles/tokens.css";
 
+/* Existing ad hoc tokens — additive only. Left in place because their
+   consumers (legacy pre-rebuild components) haven't been checked/migrated
+   yet; removing them now would risk silently breaking those screens ahead
+   of their own rebuild ticket. */
 @theme {
   --color-primary: #2563eb;
   --color-sidebar: #f8f9fa;
@@ -8,12 +18,13 @@
   --color-border-main: #e5e7eb;
 }
 
-@layer base {
-  body {
-    @apply antialiased text-[#1f2937];
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  }
-}
+/* The old ad hoc body rule (font-family/color/antialiased) that used to live
+   here is removed, not just overridden: tokens.css's own @layer base body
+   rule (imported above) is meant to win app-wide now (B-212 decision — new
+   canvas/ink/Inter styling applies today, ahead of each page's individual
+   rebuild). Keeping both would mean relying on @import source order within
+   the same Tailwind layer to break the tie, which is fragile; removing the
+   superseded one is simpler and unambiguous. */
 
 /* Markdown Styles */
 .markdown-table-content table,

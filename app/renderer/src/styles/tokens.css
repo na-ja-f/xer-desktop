@@ -1,0 +1,227 @@
+/* AI for Planner — token layer, single file.
+   OKLCH sources are documented in comments; values below are the sRGB
+   fallbacks measured for contrast. This file is the ONLY place raw hex
+   may appear.
+   Source: ai-context/AI for Planner Design System (5)/handoff/02-tokens/tokens.css
+   Copied byte-identical except two structural changes: (1) the base-reset
+   rules below (originally unlayered) are wrapped in @layer base so Tailwind
+   utilities can still override them — the :root token blocks stay unlayered
+   on purpose, see styles/theme.css for why; (2) the Google Fonts @import is
+   hoisted out to the very top of index.css instead of living here, because
+   by the time this file is inlined it's no longer the first rule in the
+   bundled stylesheet, which is invalid — @import must precede all other
+   rules in the file it ends up in, not just the file it's written in. */
+
+@layer base {
+  /* Base resets + global interaction rules. */
+  body {
+    font-family: var(--font-ui);
+    color: var(--color-text-primary);
+    background: var(--color-canvas);
+    font-size: var(--type-body-14-size);
+    line-height: var(--type-body-14-lh);
+    -webkit-font-smoothing: antialiased;
+    margin: 0;
+  }
+  a { color: var(--color-link); text-decoration: none; }
+  a:hover { color: var(--color-link-hover); text-decoration: underline; }
+  :focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-1); }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* AI for Planner — spacing (4px base), radius, elevation, motion. */
+:root {
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+  --space-12: 48px; --space-16: 64px;
+
+  /* Radius — square containers vs round pills is what makes a pill read as
+     status rather than decoration. Do not tighten the pills. */
+  --radius-card: 4px;     /* cards, KPI tiles, panels, specimen frames */
+  --radius-control: 3px;  /* inputs, dropdowns, buttons, filter chips */
+  --radius-pill: 999px;   /* legacy full-round; no current consumer */
+  --radius-label: 6px;    /* status labels and score bands */
+  --radius-none: 0;       /* table rows and cells */
+  --radius-1: var(--radius-control); /* deprecated alias */
+  --radius-2: var(--radius-card);    /* deprecated alias */
+
+  /* Elevation — exactly one level. Cards sit on border, not shadow. */
+  --elevation-1: 0 1px 2px rgba(16, 24, 40, 0.05); /* popovers, menus, palette — the only shadow */
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-medium: 180ms;
+  --motion-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Data density constants */
+  --row-height: 32px;        /* data table row */
+  --row-height-compact: 28px;
+  --tree-indent: 20px;       /* per depth level */
+  --control-height: 28px;    /* chips, segments, dropdowns */
+}
+
+/* AI for Planner — type tokens. Inter only; weights 400/500/600. No 700 anywhere.
+   Nothing below 12px. Table body never below 13px. All numerals tabular. */
+:root {
+  --font-ui: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --font-tnum: "tnum" 1;              /* apply to EVERY numeric output */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;             /* the only emphasis weight */
+
+  /* Scale — px / weight / line-height / use */
+  --type-kpi-28-size: 28px;   --type-kpi-28-weight: 600;  --type-kpi-28-lh: 1.15; /* KPI hero values (tnum) */
+  --type-title-20-size: 20px; --type-title-20-weight: 600; --type-title-20-lh: 1.25; /* page titles, secondary KPI values */
+  --type-title-16-size: 16px; --type-title-16-weight: 600; --type-title-16-lh: 1.3;  /* card + section titles */
+  --type-body-14-size: 14px;  --type-body-14-weight: 400; --type-body-14-lh: 1.5;  /* default UI text, narratives */
+  --type-body-14-md-weight: 500;                                                    /* button labels, selected states */
+  --type-body-13-size: 13px;  --type-body-13-weight: 400; --type-body-13-lh: 1.45; /* table cells — density floor */
+  --type-num-13-size: 13px;   --type-num-13-weight: 400;                            /* table numerals, tnum, right-aligned */
+  --type-num-13-strong-weight: 600;                                                 /* emphasised values ONLY — almost nothing qualifies */
+  --type-label-12-size: 12px; --type-label-12-weight: 500; --type-label-12-ls: 0.04em; /* column headers, overlines, pill labels — uppercase, muted, NEVER bold */
+  --type-meta-12-size: 12px;  --type-meta-12-weight: 400;  --type-meta-12-lh: 1.4; /* captions, timestamps — absolute minimum size */
+}
+
+/* AI for Planner — colour tokens (rev 3 — semantic tints rebuilt in OKLCH:
+   fill oklch(0.96 C H), text oklch(~0.44 C+0.10 H), sRGB-clamped, label text >= 7:1.
+   Tints sit ONLY on the white card surface, never on the grey canvas.
+   Every pairing contrast-verified; ratios in readme.md §Accessibility.
+   No raw hex outside this file. */
+:root {
+  /* Surfaces — layered: grey canvas, white cards */
+  --color-canvas: #F5F6F8;            /* app background */
+  --color-surface: #FFFFFF;           /* cards, popovers, tables */
+  --color-surface-sunken: #EDEFF3;    /* wells, table header fill */
+  --color-surface-inset: #E4E8EE;     /* input wells, inactive segments */
+  --color-surface-hover: #F2F4F8;     /* row + item hover (on white) */
+  --color-surface-selected: #E9EEF6;  /* selected row / item (navy tint) */
+
+  /* Borders */
+  --color-border-hairline: #DDE1E8;   /* decorative delimiters (non-semantic) */
+  --color-border-strong: #C8CEDA;     /* card edges, outlined controls */
+  --color-border-input: #7D8797;      /* form control boundaries — 3.63:1 white, 3.36:1 canvas */
+
+  /* Text */
+  --color-text-primary: #18243D;      /* 15.46:1 white · 14.29:1 canvas */
+  --color-text-secondary: #44506A;    /* 8.07:1 white · 7.47:1 canvas */
+  --color-text-muted: #5E6A81;        /* 5.45:1 white · 5.04:1 canvas · 4.73:1 sunken */
+  --color-text-disabled: #98A1B3;     /* disabled labels only (AA-exempt) */
+  --color-text-inverse: #FFFFFF;
+
+  /* Brand (fixed) — appears as STRUCTURE, not accent */
+  --color-brand: #1F3864;             /* 11.62:1 white · 10.74:1 canvas */
+  --color-brand-secondary: #2E5496;   /* 7.43:1 white */
+  --color-brand-hover: #27477F;
+  --color-link: #2E5496;
+  --color-link-hover: #1F3864;
+  /* Navy-as-structure applications */
+  --structure-rail-bg: var(--color-brand);                  /* icon rail background */
+  --structure-header-rule: 2px solid var(--color-brand);    /* table header bottom rule */
+  --structure-selected-bar: inset 3px 0 0 var(--color-brand); /* selected row indicator */
+
+  /* AXIS 1 — PROGRESS. Completed = green (domain convention: done = green).
+     Icons: check / half-disc / open circle. */
+  --progress-complete-fg: #005F3F;    /* oklch(0.43 0.16 162) · 7.05:1 on its bg */
+  --progress-complete-bg: #CFFFE6;    /* oklch(0.96 0.06 162) */
+  --progress-complete-border: #B5D4C4;
+  --progress-active-fg: #154CA9;      /* oklch(0.44 0.16 261) · 7.08:1 on its bg */
+  --progress-active-bg: #EBF2FF;      /* oklch(0.96 0.06 261) */
+  --progress-active-border: #A9C4E8;
+  --progress-notstarted-fg: #49505B;  /* oklch(0.43 0.02 260) · 7.25:1 on its tint — THE quiet/healthy label pair */
+  --progress-notstarted-bg: #F0F2F5;  /* oklch(0.96 0.005 260) */
+  --progress-notstarted-border: #C6CCD6; /* legacy; labels no longer draw borders */
+
+  /* AXIS 2 — VARIANCE (warm ramp). Light tint fills + dark same-hue text ONLY —
+     never a solid fill (solid red fill belongs to criticality alone).
+     Watching carries a 3px solid left edge to separate it from Not started. */
+  --variance-watching-fg: #6D4B00;    /* oklch(0.44 0.15 79) · 7.04:1 on its bg */
+  --variance-watching-bg: #FFF0D8;    /* oklch(0.96 0.05 79) */
+  --variance-watching-border: #E3D5AE;
+  --variance-atrisk-fg: #853900;      /* oklch(0.44 0.22 48) · 7.21:1 on its bg */
+  --variance-atrisk-bg: #FFEEE5;      /* oklch(0.96 0.12 48, sRGB-clamped) */
+  --variance-atrisk-border: #ECCBA4;
+  --variance-delayed-fg: #912900;     /* oklch(0.44 0.24 37) · 7.35:1 on its bg — TINT, never solid */
+  --variance-delayed-bg: #FFEDE8;     /* oklch(0.96 0.14 37, sRGB-clamped) */
+  --variance-delayed-border: #E8C2AC;
+
+  /* AXIS 3 — CRITICALITY. The ONLY solid red fill in the product.
+     The band pair below is the tint treatment for criticality PERCENTAGES
+     (red family, tint fill — cannot be confused with the solid Critical pill). */
+  --critical-band-fg: #8A0314;        /* oklch(0.40 0.16 25) · 8.29:1 on its bg */
+  --critical-band-bg: #FFE4E1;        /* oklch(0.94 0.09 25) */
+  --critical-band-max-bg: #FFD1CD;    /* oklch(0.90 0.11 25) · 100% band steps deeper · 7.25:1 */
+  --critical-fg: #FFFFFF;             /* 5.88:1 on critical */
+  --critical-bg: #C8102E;             /* 5.44:1 vs canvas (non-text) */
+  --critical-border: #C8102E;
+
+  /* Derived-judgement pills — vivid tints: fill oklch(0.94 0.06 H), text oklch(0.40 0.14 H), same hue.
+     Severity separates by hue, >=45deg apart. Healthy keeps its pill but goes achromatic grey. */
+  --judge-adverse-bg: #FFE4E1;   --judge-adverse-fg: #831A1D;   /* hue 25 rust · 8.18:1 · Exhausted / Behind */
+  --judge-caution-bg: #FFE8C2;   --judge-caution-fg: #5F4200;   /* hue 80 amber · 7.76:1 · Tight / Watch */
+  --judge-ok-bg: #F2F2F2;        --judge-ok-fg: #636363;        /* oklch(0.96/0.50 0 0) · 5.37:1 · Stable / Performing / On track / Ahead */
+  --text-adverse: #90101A;       /* deep rust table text · 9.23:1 on white · negative float, weight 600 */
+
+  /* Filter chips, live-adverse fills: oklch(0.95 0.06 H) + deep same-hue count text */
+  --chip-crit-bg: #FFE9E6;   --chip-crit-fg: #831A1D;   /* hue 25 · 8.47:1 */
+  --chip-neg-bg: #FFE9E3;    --chip-neg-fg: #821E00;    /* hue 35 · 8.44:1 */
+  --chip-del-bg: #FFEBD5;    --chip-del-fg: #653E00;    /* hue 70 · 8.07:1 */
+  --chip-risk-bg: #FFEDC7;   --chip-risk-fg: #5C4300;   /* hue 85 · 8.06:1 */
+  --chip-watch-bg: #F2EEE7;  --chip-watch-fg: #5E5443;  /* near-neutral · 6.43:1 */
+
+  /* RETIRED — violet is banned. The assistant's mark is the Lucide sparkles
+     glyph in brand blue (--color-brand-secondary); on navy surfaces it
+     inherits white at label opacity. Do not use these tokens. */
+  --ai-accent: #6B58D9;        /* oklch(0.55 0.19 285) · 5.22:1 on white (icon/non-text 3:1 ✓) */
+  --ai-accent-deep: #503EAD;   /* oklch(0.45 0.17 285) · 7.97:1 on white (text ✓) */
+  --ai-tint: #F0F0FF;          /* oklch(0.96 0.04 285) · focus ring + suggestion tint */
+  --ai-border: #DADAFF;        /* ai-tint deepened one step · rest-state border */
+
+  /* On-navy band colours (the ONE dark region) */
+  --on-navy-hero-warm: #FF716B;   /* oklch(0.72 0.18 25) · 4.33:1 on navy — 40px/600 large text */
+  --on-navy-positive: #86E79C;    /* oklch(0.85 0.14 150) · 7.70:1 on navy */
+  --on-navy-zero: #F5C761;       /* oklch(0.85 0.13 85) · 7.31:1 on navy */
+  --on-navy-adverse: #FF847D;     /* oklch(0.75 0.18 25) · 4.89:1 on navy · white 60% when value is 0 */
+
+  /* Float PILLS — same visual rank as neighbouring label columns */
+  --float-pill-pos-bg: #CBF9D3;   --float-pill-pos-fg: #005121;   /* oklch(0.94 0.07 150 / 0.38 0.14 150) · 8.20:1 */
+  --float-pill-zero-bg: #F2F2F2;  --float-pill-zero-fg: #555555;  /* neutral boundary · 6.66:1 */
+  --float-pill-neg-bg: #FFDFDC;   --float-pill-neg-fg: #810010;   /* oklch(0.93 0.08 25 / 0.38 0.16 25) · 8.68:1 */
+
+  /* Float direction (typographic, legacy). Green = healthy, shared with
+     Completed by design; green is used nowhere else. */
+  --float-positive: #005E28;         /* oklch(0.42 0.13 150) · 7.98:1 on white · weight 500 */
+  --float-positive-legacy: #14573C;          /* 8.54:1 white; always "+" prefixed */
+  --float-zero: #5E6A81;
+  --float-negative-fg: #90101A;    /* deep rust text, weight 600, "−" retained — no box, no fill */
+  --float-negative-bg: transparent;   /* legacy ink chip retired */
+
+  /* KPI value colouring (single channel: value text + required trend glyph) */
+  /* Brightened for hue discriminability at 20px: the old deep pairs passed
+     contrast but read as near-black at a glance. Still >=4.5:1 on white. */
+  --value-favourable: #007E3F;        /* oklch(0.52 0.14 152) · 5.18:1 white — unmistakably green */
+  --value-unfavourable: #BB0916;      /* oklch(0.50 0.20 27) · 6.64:1 white — unmistakably red */
+
+  /* DATA-QUALITY CAVEAT TAG — RESERVED. This amber pair marks data
+     reliability caveats ONLY (low coverage, partial data, unverified).
+     Never for schedule states, which have their own variance family.
+     No other element may adopt this treatment. */
+  --data-caveat-bg: #FFEDC7;        /* oklch(0.95 0.06 85) */
+  --data-caveat-fg: #6D5000;        /* oklch(0.45 0.12 85) · 6.50:1 on its bg */
+
+  /* Score bands — same families as status tints */
+  /* Score bands: vivid tints, severity deepens with the number */
+  --score-high-fg: #636363;  --score-high-bg: #F2F2F2;   /* neutral · 5.37:1 */
+  --score-mid-fg: #5F4200;   --score-mid-bg: #FFE8C2;    /* oklch(0.94 0.08 80) · 7.76:1 */
+  --score-low-fg: #8A0314;   --score-low-bg: #FFE4E1;    /* oklch(0.94 0.09 25) · 8.29:1 */
+
+  /* Focus — visible on every interactive element */
+  --focus-ring-color: #2E5496;        /* 7.43:1 white · 6.88:1 canvas */
+  --focus-ring: 0 0 0 2px #FFFFFF, 0 0 0 4px var(--focus-ring-color);
+}
